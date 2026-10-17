@@ -344,6 +344,10 @@ thread_local! {
     /// Paths manually unloaded via `sm plugins unload` (path → id). `poll_plugins` must NOT auto-reload
     /// a suppressed file; `sm plugins load` un-suppresses it so the next scan loads it fresh.
     static SUPPRESSED: std::cell::RefCell<HashMap<PathBuf, String>> = std::cell::RefCell::new(HashMap::new());
+    /// Files in plugins/disabled/ loaded for THIS RUN by `sm plugins load` (the loader never scans
+    /// that folder). Each scan adds them to its result; they stay disabled on disk and in
+    /// plugins.json, so a restart — or `sm plugins unload` — leaves them off again.
+    static SESSION_LOADS: std::cell::RefCell<std::collections::BTreeSet<PathBuf>> = std::cell::RefCell::new(std::collections::BTreeSet::new());
     /// L1 lifecycle v2: plugins parked because a hard dependency was not yet published (id → parsed
     /// load). Re-checked every frame by `start_unblocked_waiters`: queued for budgeted application
     /// once every hard-dep interface is published, or after `LOAD_TIMEOUT_FRAMES` (resolved decision
@@ -431,6 +435,10 @@ fn path_of_loaded(id: &str) -> Option<PathBuf> {
 
 /// Enqueue an unload of a currently-loaded plugin. Returns false if no such plugin is loaded.
 pub(crate) fn request_unload(id: &str) -> bool {
+    // `fun/@edge/rtv` names the same plugin as `@edge/rtv`: ids are unique, so the folder is just
+    // how the operator remembers where it came from.
+    let id = split_folder_spec(id).map(|(_, plugin)| plugin).unwrap_or_else(|| id.to_string());
+    let id = id.as_str();
     if path_of_loaded(id).is_none() { return false; }
     enqueue_intent(id, PendingOp::Unload)
 }
@@ -468,7 +476,80 @@ pub(crate) fn start_unblocked_waiters() {
 /// Enqueue a load of a suppressed (previously `sm plugins unload`ed) plugin. False if not suppressed.
 pub(crate) fn request_load(id: &str) -> bool {
     let suppressed = SUPPRESSED.with(|s| s.borrow().values().any(|v| v == id));
-    suppressed && enqueue_intent(id, PendingOp::Load)
+    if suppressed {
+        return enqueue_intent(id, PendingOp::Load);
+    }
+    // `<folder>/<plugin id>` — and only that spelling — loads a plugin kept in a folder under
+    // plugins/ (disabled/, fun/, …) for this run; the next scan picks it up like any other file.
+    let Some((folder, plugin_id)) = split_folder_spec(id) else { return false };
+    let Some(path) = find_in_folder(&folder, &plugin_id) else { return false };
+    let added = SESSION_LOADS.with(|s| s.borrow_mut().insert(path.clone()));
+    if added {
+        crate::v8host::log_warn(&format!(
+            "[plugins] loading '{plugin_id}' from plugins/{folder}/ for this run (it stays there on disk)"
+        ));
+    }
+    added
+}
+
+/// `fun/@edgegamers/jailbreak` → (`fun`, `@edgegamers/jailbreak`); `a/b/rtv` → (`a/b`, `rtv`). The
+/// plugin id is the last segment, or the last two when they form a scope (`@scope/name`); what is
+/// left is the folder under plugins/. None for a bare id (`@edge/rtv`, `rtv`), which never names a
+/// folder — so nothing in one loads by accident.
+pub(crate) fn split_folder_spec(spec: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = spec.split('/').collect();
+    let id_len = if parts.len() >= 2 && parts[parts.len() - 2].starts_with('@') { 2 } else { 1 };
+    if parts.len() <= id_len || parts.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    let folder = parts[..parts.len() - id_len].join("/");
+    Some((folder, parts[parts.len() - id_len..].join("/")))
+}
+
+/// The registry's file name for a plugin id (`@edgegamers/jailbreak` → `_edgegamers_jailbreak.s2sp`),
+/// the same rule as the registry's install plan.
+fn registry_filename(plugin_id: &str) -> String {
+    format!("{}.s2sp", plugin_id.replace(['@', '/'], "_"))
+}
+
+/// The file in plugins/<folder>/ holding `plugin_id`: the registry's file name for it, else (a
+/// hand-dropped or renamed file) whichever archive's manifest carries that id. The operator types
+/// the id; the escaping is ours. The folder must resolve inside plugins/ (no `..`, no absolute
+/// path, no symlink out).
+fn find_in_folder(folder: &str, plugin_id: &str) -> Option<PathBuf> {
+    let plugins = PLUGINS_DIR.with(|d| d.borrow().clone())?;
+    if folder.split('/').any(|p| p == ".." || p == ".") || Path::new(folder).is_absolute() {
+        return None;
+    }
+    let dir = plugins.join(folder).canonicalize().ok()?;
+    if dir == plugins.canonicalize().ok()? || !dir.starts_with(plugins.canonicalize().ok()?) {
+        return None;
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "s2sp") && p.is_file())
+        .collect();
+    files.sort();
+    let expected = registry_filename(plugin_id);
+    if let Some(p) = files.iter().find(|p| p.file_name().and_then(|n| n.to_str()) == Some(expected.as_str())) {
+        return Some(p.clone());
+    }
+    files.into_iter().find(|p| {
+        std::fs::read(p).ok().and_then(|b| read_s2sp(&b).ok()).is_some_and(|(m, _, _)| m.id == plugin_id)
+    })
+}
+
+/// The folder under plugins/ that `id` runs from for this run only (`sm plugins list`), if any.
+pub(crate) fn session_folder(id: &str) -> Option<String> {
+    let path = path_of_loaded(id)?;
+    if !SESSION_LOADS.with(|s| s.borrow().contains(&path)) {
+        return None;
+    }
+    // Session paths come from find_in_folder, which canonicalizes them.
+    let plugins = PLUGINS_DIR.with(|d| d.borrow().clone())?;
+    let base = plugins.canonicalize().unwrap_or(plugins);
+    let rel = path.parent()?.strip_prefix(&base).ok()?;
+    Some(rel.to_string_lossy().replace('\\', "/"))
 }
 
 /// Number of Post-drain calls between each real directory scan.
@@ -784,7 +865,11 @@ fn drain_command_intents() {
                     crate::v8host::clear_pending_handoff(&id);
                     WATCH_STATE.with(|w| { w.borrow_mut().remove(&path); });
                     FILE_STAMPS.with(|s| { s.borrow_mut().remove(&path); });
-                    SUPPRESSED.with(|s| { s.borrow_mut().insert(path, id.clone()); });
+                    // A plugin loaded from plugins/disabled/ for this run just leaves the session
+                    // set: no scan sees that folder, so nothing would reload it, and a later
+                    // `sm plugins load` finds it there again.
+                    let session = SESSION_LOADS.with(|s| s.borrow_mut().remove(&path));
+                    if !session { SUPPRESSED.with(|s| { s.borrow_mut().insert(path, id.clone()); }); }
                     crate::v8host::log_warn(&format!("[plugins] unloaded '{}' (sm plugins unload)", id));
                 }
             }
@@ -972,7 +1057,13 @@ fn handle_scan(revision: u64, entries: Result<Vec<(PathBuf, FileStamp)>, String>
         Ok(entries) => entries,
         Err(reason) => { crate::v8host::log_warn(&format!("WARN: poll_plugins: {reason}; keeping prior state")); return; }
     };
-    let current: HashMap<PathBuf, FileStamp> = entries.into_iter().collect();
+    let mut current: HashMap<PathBuf, FileStamp> = entries.into_iter().collect();
+    // plugins/disabled/ files loaded for this run join the scan; one that moved or vanished
+    // (enabled, removed, deleted) leaves the session set and unloads like any vanished file.
+    SESSION_LOADS.with(|s| s.borrow_mut().retain(|path| match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => { current.insert(path.clone(), FileStamp::from_metadata(&meta)); true }
+        _ => false,
+    }));
     FILE_STAMPS.with(|stamps| stamps.borrow_mut().retain(|path, _| current.contains_key(path)));
     let vanished: Vec<(PathBuf, String)> = WATCH_STATE.with(|w| w.borrow().iter()
         .filter(|(path, _)| !current.contains_key(*path))
@@ -1520,6 +1611,7 @@ pub(crate) fn metrics() -> serde_json::Value {
 pub(crate) fn shutdown_worker() {
     LIFECYCLE_EPOCH.fetch_add(1, Ordering::AcqRel);
     PLUGINS_DIR.with(|d| { d.borrow_mut().take(); });
+    SESSION_LOADS.with(|s| s.borrow_mut().clear());
     CONFIG_RESOLVER.with(|r| r.set(None));
     let worker = WORKER.with(|w| w.borrow_mut().take());
     if let Some(worker) = worker { worker.shutdown(); }
@@ -2594,6 +2686,79 @@ mod tests {
     }
 
     #[test]
+    fn folder_specs_split_the_plugin_id_from_its_folder() {
+        let split = |s: &str| split_folder_spec(s).map(|(f, i)| (f, i));
+        assert_eq!(split("fun/@edgegamers/jailbreak"), Some(("fun".into(), "@edgegamers/jailbreak".into())));
+        assert_eq!(split("disabled/rtv"), Some(("disabled".into(), "rtv".into())));
+        assert_eq!(split("events/2026/@edge/rtv"), Some(("events/2026".into(), "@edge/rtv".into())));
+        // A bare id never names a folder.
+        assert_eq!(split("@edgegamers/jailbreak"), None);
+        assert_eq!(split("rtv"), None);
+        assert_eq!(split("fun//rtv"), None);
+        assert_eq!(split("/rtv"), None);
+    }
+
+    /// Any folder under plugins/ works; a hand-dropped or renamed archive is still found by the id
+    /// in its manifest; nothing outside plugins/ is reachable.
+    #[test]
+    fn folder_loads_map_ids_to_files_inside_plugins_only() {
+        assert_eq!(registry_filename("@edgegamers/jailbreak"), "_edgegamers_jailbreak.s2sp");
+        assert_eq!(registry_filename("rtv"), "rtv.s2sp");
+        let base = std::env::temp_dir().join(format!("s2s-folders-{}", std::process::id()));
+        let plugins = base.join("plugins");
+        std::fs::create_dir_all(plugins.join("fun").join("events")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let archive = |id: &str| make_test_s2sp(&format!(r#"{{"id":"{id}","version":"1.0.0","apiVersion":"1.x"}}"#), "module.exports={};");
+        std::fs::write(plugins.join("fun").join("_edgegamers_jailbreak.s2sp"), archive("@edgegamers/jailbreak")).unwrap();
+        std::fs::write(plugins.join("fun").join("events").join("renamed-by-hand.s2sp"), archive("@edge/rtv")).unwrap();
+        std::fs::write(base.join("outside").join("_edge_evil.s2sp"), archive("@edge/evil")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), plugins.join("escape")).unwrap();
+        PLUGINS_DIR.with(|d| *d.borrow_mut() = Some(plugins.clone()));
+        let canon = |p: PathBuf| p.canonicalize().unwrap();
+
+        assert_eq!(find_in_folder("fun", "@edgegamers/jailbreak"), Some(canon(plugins.join("fun").join("_edgegamers_jailbreak.s2sp"))));
+        assert_eq!(find_in_folder("fun/events", "@edge/rtv"), Some(canon(plugins.join("fun").join("events").join("renamed-by-hand.s2sp"))));
+        assert_eq!(find_in_folder("fun", "@edge/missing"), None);
+        assert_eq!(find_in_folder("nope", "@edgegamers/jailbreak"), None);
+        // Never outside plugins/: `..`, absolute paths, a symlink that leads out.
+        assert_eq!(find_in_folder("../outside", "@edge/evil"), None);
+        assert_eq!(find_in_folder(base.join("outside").to_str().unwrap(), "@edge/evil"), None);
+        assert_eq!(find_in_folder("escape", "@edge/evil"), None);
+        assert_eq!(find_in_folder(".", "@edgegamers/jailbreak"), None);
+
+        PLUGINS_DIR.with(|d| { d.borrow_mut().take(); });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Unloading a plugin that runs from plugins/disabled/ for this run drops it from the session
+    /// instead of suppressing it — nothing scans that folder, so a later `load` must find it there.
+    #[test]
+    fn unload_of_a_session_plugin_ends_the_session_without_suppressing() {
+        shutdown_worker();
+        crate::v8host::init(crate::v8host::frame_tests::dummy_logger()).unwrap();
+        crate::v8host::frame_tests::load_body("session-off", "return {};", "{}");
+        let dir = std::env::temp_dir().join(format!("s2s-session-unload-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("disabled")).unwrap();
+        let path = dir.join("disabled").join("off.s2sp");
+        std::fs::write(&path, b"x").unwrap();
+        let stamp = crate::loader_worker::FileStamp::from_metadata(&std::fs::metadata(&path).unwrap());
+        commit_path(&path, stamp, "session-off");
+        SESSION_LOADS.with(|s| { s.borrow_mut().insert(path.clone()); });
+        PLUGINS_DIR.with(|d| *d.borrow_mut() = Some(dir.canonicalize().unwrap()));
+        assert_eq!(session_folder("session-off").as_deref(), Some("disabled"));
+
+        assert!(request_unload("disabled/session-off"), "the folder form names the same plugin");
+        drain_command_intents();
+        assert!(crate::v8host::plugin_phase("session-off").is_none(), "unloaded");
+        assert!(SESSION_LOADS.with(|s| s.borrow().is_empty()), "the run-only load ended");
+        assert!(!SUPPRESSED.with(|s| s.borrow().contains_key(&path)), "not suppressed: load finds it again");
+
+        shutdown_worker();
+        crate::v8host::shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn vanished_path_cancels_ready_candidate_and_cannot_resurrect_it() {
         crate::v8host::init(crate::v8host::frame_tests::dummy_logger()).unwrap();
         let ledger = RetainedLedger::new(1, 1024);
@@ -2729,6 +2894,49 @@ mod tests {
         shutdown_worker();
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// `sm plugins load <folder>/<id>` reaches into a folder under plugins/ for this run only: the
+    /// file joins the scan (here: an old-API plugin, refused at load, which proves the scan saw it),
+    /// the folder is otherwise never scanned, and a file that moves away leaves the session.
+    #[test]
+    fn load_reaches_a_disabled_plugin_for_this_run_only() {
+        let dir = std::env::temp_dir().join(format!("s2s-session-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("disabled")).expect("mk tempdir");
+        let bytes = make_test_s2sp(r#"{"id":"@old/off","version":"0.1.0","apiVersion":"1.x"}"#, "module.exports={};");
+        let p = dir.join("disabled").join("_old_off.s2sp");
+        std::fs::write(&p, &bytes).expect("write s2sp");
+        set_plugins_dir(dir.to_str().unwrap());
+        let scan = || {
+            for _ in 0..10_000 {
+                poll_plugins();
+                if WATCH_STATE.with(|ws| ws.borrow().contains_key(&p)) { break; }
+                std::thread::yield_now();
+            }
+        };
+        scan();
+        assert!(!WATCH_STATE.with(|ws| ws.borrow().contains_key(&p)), "plugins/disabled/ is never scanned on its own");
+
+        assert!(!request_load("@old/off"), "a bare id never reaches into a folder");
+        assert!(!request_load("disabled/@nobody/here"), "no such disabled plugin");
+        assert!(request_load("disabled/@old/off"), "disabled/<id> maps the id to its file");
+        assert!(!request_load("disabled/@old/off"), "already loaded for this run");
+        scan();
+        assert!(WATCH_STATE.with(|ws| ws.borrow().contains_key(&p)), "the session file joins the scan");
+
+        // Moving the file away (enable, remove, delete) drops it from the session.
+        std::fs::remove_file(&p).unwrap();
+        for _ in 0..10_000 {
+            poll_plugins();
+            if SESSION_LOADS.with(|s| s.borrow().is_empty()) { break; }
+            std::thread::yield_now();
+        }
+        assert!(SESSION_LOADS.with(|s| s.borrow().is_empty()));
+        assert!(!WATCH_STATE.with(|ws| ws.borrow().contains_key(&p)));
+
+        crate::v8host::clear_failed("@old/off");
+        shutdown_worker();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -------------------------------------------------------------------

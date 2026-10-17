@@ -16,6 +16,10 @@ export interface PluginInfo {
    * - `"unloaded"` — on disk but manually unloaded via `unload` (not auto-reloaded until `load`/`reload`).
    */
   readonly state: "running" | "loading" | "waiting" | "failed" | "unloaded";
+  /** The folder under `plugins/` (e.g. `"disabled"`, `"fun"`) this plugin was loaded from by
+   * {@link Plugins.load} for this run only — it stays there on disk, so a restart leaves it off.
+   * null for a plugin loaded from `plugins/` itself. */
+  readonly folder: string | null;
 }
 /**
  * Enumerate and drive the plugin set at runtime (list / load / unload / reload).
@@ -32,7 +36,14 @@ export declare const Plugins: {
   unload(id: string): boolean;
   /** Reload a plugin (unload + load from disk, deferred). false if the id is unknown. */
   reload(id: string): boolean;
-  /** Load a previously-unloaded plugin (deferred). false if it isn't currently unloaded. */
+  /**
+   * Load a plugin that isn't running (deferred): one unloaded earlier this run, by id — or, as
+   * `"<folder>/<plugin id>"` (e.g. `"fun/@edgegamers/jailbreak"`, `"disabled/@edge/rtv"`), one kept
+   * in any folder under `plugins/`, for THIS RUN ONLY. Only a folder prefix reaches into a folder;
+   * the id is mapped to its file for you; nothing outside `plugins/` is reachable. The file stays
+   * where it is (a restart leaves it off; for disabled/ plugins, `enable` makes it permanent).
+   * false if there is no such plugin. `unload` accepts the same `<folder>/<plugin id>` form.
+   */
   load(id: string): boolean;
   /**
    * Add registry plugins to the server's `addons/s2script/plugins.json` and install them with their
