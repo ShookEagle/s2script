@@ -468,3 +468,19 @@ registry can never publish it publicly. `s2s install` now sends the login/`S2SCR
 read-only server tokens can install restricted plugins. The registry half (access column, private
 bucket, gated reads, read-only tokens) is s2script-website PR #80. No runtime change; no live gate
 needed.
+
+## 2026-10-16 — Server plugins.json + plugins-lock.json, updated at startup
+
+A server can now list its plugins as npm-style `dependencies` in `addons/s2script/plugins.json`,
+with an npm-v3-shaped `plugins-lock.json` beside it. Not `package.json`, so
+`npm install` can never resolve those names against npmjs.com. `s2s server init` generates both
+from the installed plugins, and `s2s install` / `s2s update` work like npm's (the first
+`s2s install <name>` creates `plugins.json`). The old `s2script-plugins.json` / `--dir` installer is
+removed. At every startup the
+runtime (`core/src/server_update.rs`, started from `loader::set_plugins_dir`) resolves each range
+through the registry's `/plan`, stages and sha256-verifies every changed `.s2sp`, then commits the
+files and the lock together. The loader holds its first scan until that finishes, or until
+`updateTimeoutSeconds`; any failure or timeout loads what is on disk, unchanged. Restricted plugins
+use `S2SCRIPT_TOKEN` or `configs/registry.json`. The CLI and the runtime write byte-identical
+locks, pinned by a shared fixture and checked live against a local registry. Not yet live-gated in
+CS2. Design: `docs/superpowers/specs/2026-10-16-server-manifest-design.md`.

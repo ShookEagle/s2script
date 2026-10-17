@@ -185,6 +185,17 @@ restricted, and refuses otherwise, so it never goes out public by accident. `s2s
 `s2s add` send your login, so members install restricted packages as usual. A server that only
 installs should use a read-only token (s2script.com → Deploy tokens) as `S2SCRIPT_TOKEN`.
 
+## Servers
+
+A game server lists its registry plugins as npm-style `dependencies` in
+`addons/s2script/plugins.json`, with a `plugins-lock.json` beside it. These are npm's shapes under
+their own names, so npm never treats the folder as a Node project. From the game directory,
+`s2s install <name>[@range]` adds a plugin (creating `plugins.json` the first time, like npm). Plain
+`s2s install` installs exactly the lock, and `s2s update` moves each plugin to the newest version
+its range allows. `s2s server init` writes both files from plugins already installed. The runtime
+runs the same update at every startup before loading plugins (`"autoUpdate": false` turns it off).
+See [INSTALL.md](https://github.com/s2script/s2script/blob/main/docs/INSTALL.md).
+
 ## Docs
 
 **[s2script.com/docs](https://s2script.com/docs)** — getting started, guides, and the full API
