@@ -1267,6 +1267,22 @@ mod tests {
     }
 
     #[test]
+    fn first_scan_wait_reports_the_hold_without_ending_it() {
+        *GATE.lock().unwrap() = None;
+        assert_eq!(first_scan_wait(), None);
+        let phase = Arc::new(Mutex::new(Phase::Running));
+        *GATE.lock().unwrap() = Some(Gate { phase: phase.clone(), deadline: Instant::now() + Duration::from_secs(60) });
+        let wait = first_scan_wait().unwrap();
+        assert!(wait > Duration::from_secs(55) && wait <= Duration::from_secs(60), "{wait:?}");
+        *phase.lock().unwrap() = Phase::Committing;
+        assert_eq!(first_scan_wait(), Some(Duration::ZERO));
+        *phase.lock().unwrap() = Phase::Done(Vec::new());
+        assert_eq!(first_scan_wait(), None);
+        assert!(GATE.lock().unwrap().is_some(), "reading the wait must not end the hold");
+        *GATE.lock().unwrap() = None;
+    }
+
+    #[test]
     fn gate_holds_until_done_and_releases_on_deadline() {
         let phase = Arc::new(Mutex::new(Phase::Running));
         *GATE.lock().unwrap() = Some(Gate { phase: phase.clone(), deadline: Instant::now() + Duration::from_secs(60) });

@@ -635,3 +635,23 @@ Also from that server's log:
 Tests: 31 plugins (several queue rounds) plus an awaited `OnPluginStart` all running when the FFI
 entry returns, with no frame; the startup load waiting out a held plugins.json update; `__s2_once`
 across contexts and shutdown. Core: 1099 pass, 9 ignored. Live gate pending.
+
+## 2026-10-20 — Say why no plugin loads
+
+A server ran `sm` but no plugin: `sm plugins list` printed `Plugins (0)` and every plugin command
+was "Unknown command". The plugin loader, timers, async results and the startup plugins.json update
+all run from the `GameFrame` hook, and the evidence (`[update] checking …` never resolved; `Unload()`
+at quit in phase `Running`, so the first-frame lifecycle hooks were never installed) says no frame
+reached s2script. The `GameFrame` install dropped its result and refusal reason silently, so the log
+could not say so. The server also ran Game Fixes and MultiAddonManager.
+
+- The shim logs `GameFrame hook installed …` or `ERROR: GameFrame hook NOT installed (<reason>)`, and
+  once per load `first GameFrame reached s2script — per-frame dispatch is live`. Installed but never
+  reached means another addon replaced or bypassed the virtual.
+- `sm plugins list`, when empty, adds why: the loader is not running; no `GameFrame` has reached
+  s2script; the plugins.json update still holds the first scan (and for how long); `plugins/` not
+  scanned yet; or `plugins/` is empty (`loader::empty_reason`, `server_update::first_scan_wait`).
+- INSTALL: a "No plugins load" section.
+
+On that server the cause turned out to be hibernation: an empty server runs no `GameFrame` (see
+"Plugins load at startup" above, which fixes it). These lines still name a refused or bypassed hook.

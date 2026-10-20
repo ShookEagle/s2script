@@ -245,6 +245,22 @@ plugins with one `s2s install`.
 
 Plugins declare `s2script.apiVersion` (today `"1.x"`). The host refuses a mismatched **major** at load time.
 
+## No plugins load
+
+If `sm plugins list` shows no plugins and plugin commands (`sm_who`, `sm_help`) are "Unknown
+command", the list's second line says why: the loader is not running, the plugins.json update still
+holds the first scan, `plugins/` has not been scanned, or it is empty. Plugins load at startup (see
+"When plugins load"); after that, timers, async results and hot reload run from the `GameFrame`
+hook. Check the startup log:
+
+- `[plugins] startup load done: N plugin(s) running` — the startup load finished.
+- `GameFrame hook installed`, then `first GameFrame reached s2script` once the server runs frames —
+  per-frame work is live. On an empty, hibernating server that second line waits for the first player.
+- `ERROR: GameFrame hook NOT installed (<reason>)` — the hook was refused; the reason says why.
+- `GameFrame hook installed` but never `first GameFrame reached s2script` while players are on —
+  another Metamod addon replaced or bypassed the `GameFrame` virtual after s2script. Run `meta list`
+  and try without the other addons.
+
 ## After a CS2 update
 
 - Re-check `gameinfo.gi` — a full game re-download often removes the Metamod SearchPath; re-apply the patch above.
