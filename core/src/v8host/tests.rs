@@ -9990,3 +9990,6 @@ mod value_copy;
 
 #[path = "tests/immutable_contract.rs"]
 mod immutable_contract;
+
+#[path = "tests/profiler.rs"]
+mod profiler;
