@@ -119,6 +119,22 @@ export interface Pawn extends Omit<CCSPlayerPawn, "controller"> {
   readonly aimPunchServices: AimPunchServices | null;
   /** Best-effort velocity write (m_vecAbsVelocity); returns false if stale/unresolved. */
   setVelocity(x: number, y: number, z: number): boolean;
+  /**
+   * Allocation-free movement snapshot for per-tick hot paths (run timers, replay recorders). One
+   * native call writes {@link Pawn.KINEMATICS_SLOTS} (13) numbers into your preallocated
+   * `out` from `outIndex` (default 0):
+   *
+   * `[0..2]` origin xyz · `[3..5]` eye angles pitch/yaw/roll · `[6..8]` abs velocity xyz ·
+   * `[9]` `m_fFlags` · `[10]` `m_MoveType` · `[11]` duck amount (0..1) · `[12]` held buttons (low
+   * 32 bits, same as {@link Pawn.buttons}). `[11]`/`[12]` are NaN if the movement services pointer
+   * is null.
+   *
+   * False when the pawn is stale, a schema field did not resolve, or `out` is too short.
+   * @example
+   * const snap = new Float64Array(Pawn.KINEMATICS_SLOTS);
+   * if (pawn.readKinematics(snap)) console.log(Math.hypot(snap[6], snap[7]));   // 2D speed
+   */
+  readKinematics(out: Float64Array, outIndex?: number): boolean;
   /** Acquire the pawn-owned camera, creating it on demand. Null if stale or bindings unavailable. */
   getCustomCamera(): CustomPlayerCamera | null;
   /** The pawn's MoveType_t (uint8; null on a stale ref). Setting writes both m_MoveType and
@@ -194,9 +210,24 @@ export interface Pawn extends Omit<CCSPlayerPawn, "controller"> {
  * const pawn = Pawn.forSlot(0);
  * if (pawn) console.log(pawn.activeWeapon?.clip1);
  */
+/**
+ * The world transform (`absOrigin`, `absRotation`, …) of any entity, through the same
+ * CBodyComponent → CGameSceneNode chain as `pawn.sceneNode`. Null for a stale ref.
+ * @example
+ * import { Entity } from "@s2script/sdk";
+ * import { sceneNodeOf } from "@s2script/cs2";
+ * for (const dest of Entity.findByClass("info_teleport_destination")) {
+ *   const node = sceneNodeOf(dest);
+ *   console.log(dest.name, node?.absOrigin, node?.absRotation);
+ * }
+ */
+export declare function sceneNodeOf(ref: EntityRef): SceneNode | null;
+
 export declare const Pawn: {
   /** The Pawn for a player slot, or null if unoccupied / invalidated. */
   forSlot(slot: number): Pawn | null;
+  /** Slots one {@link Pawn.readKinematics} snapshot fills (13). */
+  readonly KINEMATICS_SLOTS: number;
 };
 
 /**
@@ -215,6 +246,14 @@ export interface Player extends Omit<CCSPlayerController, "pawn"> {
   readonly slot: number;
   /** This player's in-world pawn (the body), or null if dead/absent. */
   readonly pawn: Pawn | null;
+  /**
+   * The pawn this player is spectating (dead or on the spectator team), via the controller's
+   * observer pawn and its observer services. `null` while alive, in free-roam, or when unresolved.
+   * Resolve the watched player with `observerTarget.controller`.
+   */
+  readonly observerTarget: Pawn | null;
+  /** The engine observer mode (`ObserverMode_t`: 0 none, 2 in-eye, 3 chase, 4 roaming…), `-1` while alive/unresolved. */
+  readonly observerMode: number;
   /**
    * Per-match scoreboard counters — kills/deaths/assists/damage — via the
    * `m_pActionTrackingServices` pointer hop plus the embedded `m_matchStats` block.

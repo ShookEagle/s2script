@@ -2195,6 +2195,35 @@ static float s2_server_game_time() {
     CGlobalVars* g = gs->GetGlobals();
     return g ? g->curtime : 0.0f;
 }
+// Timer-grade clock: the integer simulation tick and its fixed length. A run timer counts ticks
+// (exact, monotonic within a map) rather than differencing float curtime. Degrade: 0 / 0.0f.
+static int s2_server_tick_count() {
+    INetworkGameServer* gs = S2_GameServer();
+    if (!gs) return 0;
+    CGlobalVars* g = gs->GetGlobals();
+    return g ? g->tickcount : 0;
+}
+// The tick length comes from the game's own ISource2ServerConfig::GetTickInterval (a typed SDK
+// virtual on the interface we already hold; fixed at server start), validated to a sane range.
+// Only if that interface is missing do we derive it from our clock: curtime ~= tickcount * interval,
+// so tickcount/curtime snapped to a whole rate. That snap is trusted only after 256 ticks, where a
+// subtick or start-offset error of up to a tick moves the ratio by well under 0.5. Degrade: 0.0f.
+static float s2_server_tick_interval() {
+    static float cached = 0.0f;
+    if (cached > 0.0f) return cached;
+    ISource2ServerConfig* cfg = g_S2ScriptPlugin.m_serverConfig;
+    if (cfg) {
+        float iv = cfg->GetTickInterval();
+        if (iv > 0.0f && iv < 1.0f) { cached = iv; return cached; }
+    }
+    INetworkGameServer* gs = S2_GameServer();
+    if (!gs) return 0.0f;
+    CGlobalVars* g = gs->GetGlobals();
+    if (!g || g->tickcount < 256 || !(g->curtime > 0.0f)) return 0.0f;
+    double rate = (double)g->tickcount / (double)g->curtime;
+    long whole = (long)(rate + 0.5);
+    return whole > 0 ? (float)(1.0 / (double)whole) : 0.0f;
+}
 
 // Crash-reporter slice: the engine build number, read from the mod directory's steam.inf
 // (`ServerVersion=<n>`, e.g. 2000876 — the same number the treadmill and docs/re-strategy.md
