@@ -203,44 +203,36 @@ static bool S2_FinishUnloadCleanup();
 
 namespace {
 
-using PostEvent8Mfp = void (IGameEventSystem::*)(CSplitScreenSlot, bool, int, const uint64*,
-    INetworkMessageInternal*, const CNetMessage*, unsigned long, NetChannelBufType_t);
+// Each hook's vtable index is gamedata, verified per interface at acquisition
+// (S2_ResolveHookSlots). -1 = unverified: never hooked.
+enum S2HookSlot {
+    kHS_GameFrame,
+    kHS_ServerConfigShutdown, kHS_ServerConfigPreShutdown,
+    kHS_OnClientConnected, kHS_ClientPutInServer, kHS_ClientActive, kHS_ClientFullyConnect,
+    kHS_ClientDisconnect, kHS_ClientCommand, kHS_ClientSettingsChanged, kHS_ClientVoice,
+    kHS_CheckTransmit,
+    kHS_FireEvent,
+    kHS_PostEventAbstract,
+    kHS_StartupServer,
+    kHS_DispatchConCommand,
+    kHS_SetClientListening,
+    kHS_Count
+};
+int s_hookSlot[kHS_Count] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
 
-template <typename Mfp>
-bool S2KHookVtableOk(Mfp mfp, const char* name) {
-    if (KHook::GetVtableIndex(mfp) == -1) {
-        META_CONPRINTF("[s2script] KHOOK FAIL: %s GetVtableIndex=-1\n", name);
-        return false;
-    }
-    return true;
-}
-
+// Hook `obj` at its verified gamedata slot. The member pointer in the S2CheckedVirtual's
+// constructor only fixes the callback's C++ type; Configure replaces the index it carried.
 template <typename Iface, typename Ret, typename... Args>
-bool S2KHookAdd(S2CheckedVirtual<Iface, Ret, Args...>& hook, Iface* obj,
-                Ret (Iface::*mfp)(Args...), [[maybe_unused]] const char* name) {
-    // Named GetVtableIndex=-1 is printed in Load; skip Add here so the installed flag stays false.
-    if (KHook::GetVtableIndex(mfp) == -1 || obj == nullptr) {
+bool S2KHookAddSlot(S2CheckedVirtual<Iface, Ret, Args...>& hook, Iface* obj, S2HookSlot slot,
+                    const char* name) {
+    if (obj == nullptr) return false;
+    if (s_hookSlot[slot] < 0) {
+        META_CONPRINTF("[s2script] %s hook NOT installed — its slot is unverified (see the gamedata FAIL "
+                       "line above)\n", name);
         return false;
     }
+    hook.Configure(s_hookSlot[slot]);
     return hook.Add(obj).Accepted();
-}
-
-void S2KHookLogInterfaceVtables() {
-    S2KHookVtableOk(&ISource2Server::GameFrame, "GameFrame");
-    S2KHookVtableOk(&IGameEventManager2::FireEvent, "FireEvent");
-    S2KHookVtableOk(static_cast<PostEvent8Mfp>(&IGameEventSystem::PostEventAbstract), "PostEventAbstract");
-    S2KHookVtableOk(&ISource2GameClients::ClientCommand, "ClientCommand");
-    S2KHookVtableOk(&ICvar::DispatchConCommand, "DispatchConCommand");
-    S2KHookVtableOk(&ISource2GameClients::OnClientConnected, "OnClientConnected");
-    S2KHookVtableOk(&ISource2GameClients::ClientPutInServer, "ClientPutInServer");
-    S2KHookVtableOk(&ISource2GameClients::ClientActive, "ClientActive");
-    S2KHookVtableOk(&ISource2GameClients::ClientFullyConnect, "ClientFullyConnect");
-    S2KHookVtableOk(&ISource2GameClients::ClientDisconnect, "ClientDisconnect");
-    S2KHookVtableOk(&ISource2GameClients::ClientSettingsChanged, "ClientSettingsChanged");
-    S2KHookVtableOk(&ISource2GameClients::ClientVoice, "ClientVoice");
-    S2KHookVtableOk(&ISource2GameEntities::CheckTransmit, "CheckTransmit");
-    S2KHookVtableOk(&IVEngineServer2::SetClientListening, "SetClientListening");
-    S2KHookVtableOk(&INetworkServerService::StartupServer, "StartupServer");
 }
 
 }  // namespace
@@ -1161,6 +1153,77 @@ static std::map<std::string, ConCommandRef> s_concommandRefs;
 static IVEngineServer2* s_pEngine = nullptr;
 
 // ---------------------------------------------------------------------------
+// IVEngineServer2 calls: compiled virtuals, gated on the live layout.
+//
+// The calls below are typed virtuals against the vendored hl2sdk eiface.h, the way every Source 2
+// framework makes them; a CS2 update that moves a slot is fixed in the header and shipped in a
+// build. The Oct 22 2026 update did exactly that — it inserted a virtual at slot 65, so the slot we
+// called as GetClientXUID became GetPlayerInfo(slot, message&) and crashed every player join — and
+// patches/hl2sdk/0001 carries the fix (s2sdk #116) until the s2sdk move.
+//
+// What must never happen again is a stale build calling the wrong function. So the calls run only
+// while the live CEngineServer vtable has the slot count this build's header was verified against
+// (gamedata IVEngineServer2_vtableSize, checked at Load by S2_CheckEngineLayout). On a mismatch
+// every op degrades to the miss value it already had for a missing interface, one loud line names
+// why, and the server keeps running until a build with the fixed header ships.
+// ---------------------------------------------------------------------------
+static bool s_engineCallsOk = false;
+static IVEngineServer2* S2EngineCalls() { return s_engineCallsOk ? s_pEngine : nullptr; }
+
+// Typed wrappers. Each returns the same miss value its op already degraded to when the engine
+// interface was missing, so a gated-off engine looks exactly like a missing interface.
+static bool S2Engine_IsMapValid(const char* map) {
+    IVEngineServer2* e = S2EngineCalls();
+    return e && map ? e->IsMapValid(map) != 0 : false;
+}
+// CPlayerUserId(-1).Get() (65535) on a miss: the engine's own "no user" sentinel, which the
+// bootstrap/reconcile scans already treat as an empty slot.
+static int S2Engine_GetPlayerUserId(int slot) {
+    IVEngineServer2* e = S2EngineCalls();
+    return e ? e->GetPlayerUserId(CPlayerSlot(slot)).Get() : CPlayerUserId(-1).Get();
+}
+// Null on a miss — every caller already reads null as "bot / no netchannel, skip".
+static INetChannelInfo* S2Engine_GetPlayerNetInfo(int slot) {
+    IVEngineServer2* e = S2EngineCalls();
+    return e ? e->GetPlayerNetInfo(CPlayerSlot(slot)) : nullptr;
+}
+static bool S2Engine_ServerCommand(const char* cmd) {
+    IVEngineServer2* e = S2EngineCalls();
+    if (!e || !cmd) return false;
+    e->ServerCommand(cmd);
+    return true;
+}
+// ClientCommand is FMTFUNCTION(3,4): always pass "%s" + the text, never the text as the format.
+static bool S2Engine_ClientCommand(int slot, const char* cmd) {
+    IVEngineServer2* e = S2EngineCalls();
+    if (!e || !cmd) return false;
+    e->ClientCommand(CPlayerSlot(slot), "%s", cmd);
+    return true;
+}
+static void S2Engine_ClientPrintf(int slot, const char* msg) {
+    IVEngineServer2* e = S2EngineCalls();
+    if (e) e->ClientPrintf(CPlayerSlot(slot), msg ? msg : "");
+}
+static const char* S2Engine_GetClientConVarValue(int slot, const char* name) {
+    IVEngineServer2* e = S2EngineCalls();
+    return e ? e->GetClientConVarValue(CPlayerSlot(slot), name) : nullptr;
+}
+static bool S2Engine_GetClientListening(int a, int b) {
+    IVEngineServer2* e = S2EngineCalls();
+    return e ? e->GetClientListening(CPlayerSlot(a), CPlayerSlot(b)) : false;
+}
+static bool S2Engine_SetClientListening(int a, int b, bool listen) {
+    IVEngineServer2* e = S2EngineCalls();
+    return e ? e->SetClientListening(CPlayerSlot(a), CPlayerSlot(b), listen) : false;
+}
+static bool S2Engine_KickClient(int slot, const char* reason, ENetworkDisconnectionReason why) {
+    IVEngineServer2* e = S2EngineCalls();
+    if (!e) return false;
+    e->KickClient(CPlayerSlot(slot), reason, why);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // IGameEventSystem + INetworkMessages — stored at Load() for client_print (Slice 6.1).
 // The CS2 chat path: FindNetworkMessage("CUserMessageSayText2") → AllocateMessage()
 // → ToPB<CUserMessageSayText2>() → field setters → PostEventAbstract.
@@ -1207,12 +1270,12 @@ static int s2_client_valid(int slot) {
     return s2_client_signon(slot) >= kSignonConnected ? 1 : 0;   // tracked; bots included (connect fires)
 }
 static int s2_client_userid(int slot) {
-    if (!s_pEngine || !s2_client_valid(slot)) return -1;
-    return s_pEngine->GetPlayerUserId(CPlayerSlot(slot)).Get();  // real engine user-id for an occupied slot
+    if (!s2_client_valid(slot) || !s_engineCallsOk) return -1;
+    return S2Engine_GetPlayerUserId(slot);  // real engine user-id for an occupied slot
 }
 static const char* s2_client_name(int slot) {
-    if (!s_pEngine || !s2_client_valid(slot)) return nullptr;
-    return s_pEngine->GetClientConVarValue(CPlayerSlot(slot), "name");  // userinfo name; core copies
+    if (!s2_client_valid(slot)) return nullptr;
+    return S2Engine_GetClientConVarValue(slot, "name");  // userinfo name; core copies
 }
 static int s2_client_find_by_userid(int id) {
     if (id < 0) return -1;
@@ -1250,7 +1313,7 @@ static int s2_event_fire_to_client(int slot) {
     // Require the sig-resolved listener helper, and bot-skip: a fake client has no netchannel
     // (GetPlayerNetInfo == null) — firing to one is pointless/unsafe (the print-ops precedent). Free the
     // event on every miss path so the CreateEvent()'d event never leaks.
-    if (!s_pGetLegacyListener || !s_pEngine || !s_pEngine->GetPlayerNetInfo(CPlayerSlot(slot))) {
+    if (!s_pGetLegacyListener || !S2Engine_GetPlayerNetInfo(slot)) {
         s_pGameEventManager->FreeEvent(e);
         return 0;
     }
@@ -1462,7 +1525,7 @@ static void s2_client_print(int slot, const char* msg) {
         return;
     }
     // Skip bots / clients with no netchannel — a print to a fake client can crash (SM's fake-client skip).
-    if (!s_pEngine->GetPlayerNetInfo(CPlayerSlot(slot))) return;
+    if (!S2Engine_GetPlayerNetInfo(slot)) return;
     INetworkMessageInternal* pInfo = s_pNetworkMessages->FindNetworkMessagePartial("SayText2");
     if (!pInfo) {
         static bool s_warnedNoMsg = false;
@@ -1593,12 +1656,12 @@ static int s2_user_message_send(const int* slots, int slotCount) {
     uint64 clients = 0;
     if (slotCount < 0) {                                   // broadcast to all live non-bot slots
         for (int s = 0; s < 64; ++s)
-            if (s_pEngine && s_pEngine->GetPlayerNetInfo(CPlayerSlot(s))) clients |= (1ull << (uint64)s);
+            if (S2Engine_GetPlayerNetInfo(s)) clients |= (1ull << (uint64)s);
     } else if (slots) {
         for (int i = 0; i < slotCount; ++i) {
             int s = slots[i];
             if (s < 0 || s >= 64) continue;
-            if (s_pEngine && !s_pEngine->GetPlayerNetInfo(CPlayerSlot(s))) continue;   // skip bots (would crash)
+            if (!S2Engine_GetPlayerNetInfo(s)) continue;   // skip bots (would crash)
             clients |= (1ull << (uint64)s);
         }
     }
@@ -1691,8 +1754,8 @@ static int s2_usermsg_hook_sub(const char* name, char* canonicalOut, int canonic
     }
     if (canonicalOut && canonicalLen > 0) snprintf(canonicalOut, (size_t)canonicalLen, "%s", canonical);
     if (!s_userMsgHookInstalled) {   // lazy install, idempotent (m_eventHookInstalled pattern; PRE callback)
-        s_userMsgHookInstalled = S2KHookAdd(g_hk.postEvent, s_pGameEventSystem,
-            static_cast<PostEvent8Mfp>(&IGameEventSystem::PostEventAbstract), "PostEventAbstract");
+        s_userMsgHookInstalled = S2KHookAddSlot(g_hk.postEvent, s_pGameEventSystem,
+            kHS_PostEventAbstract, "PostEventAbstract");
         if (!s_userMsgHookInstalled) return -1;
         META_CONPRINTF("[s2script] usermsg: PostEventAbstract hook installed (lazy, first subscribe)\n");
     }
@@ -1829,24 +1892,65 @@ static int s2_usermsg_hook_debug(char* buf, int buflen) {
 // Client SteamID64 engine-op (Slice 6.2).
 //
 // Returns the SteamID64 of the client in `slot` as a decimal string in a static buffer.
-// Returns "0" for bots, unauthenticated clients, or out-of-range slots.
-// Via IVEngineServer2::GetClientXUID (already acquired in Load for client_print).
+// Returns "0" for bots, unknown clients, or out-of-range slots.
+//
+// NO ENGINE VTABLE CALL. This used to be IVEngineServer2::GetClientXUID at a compiled-in slot, and
+// that is the call that crashed every player join on the Oct 22 2026 CS2 build (the slot became
+// GetPlayerInfo). The engine already HANDS us the xuid: OnClientConnected, ClientPutInServer,
+// ClientActive and ClientDisconnect all carry it as an argument, and we hook all four. So it is
+// recorded there (S2_BeginClientXuid / S2_RecordClientXuid), before the core dispatch, which is the moment basebans asks.
+//
+// After a late load nothing re-fires for clients already in the server, so the fallback is the
+// player controller's m_steamID schema field (CBasePlayerController, the Source 2 base class):
+// located by NAME at runtime through the schema system, the same source CounterStrikeSharp reads.
+// A field move is self-healing; a missing class/field degrades to "0".
 // ---------------------------------------------------------------------------
+static uint64 s_clientXuid[kMaxClientSlots] = {0};
+static bool   s_clientFake[kMaxClientSlots] = {false};
+// OnClientConnected fires for EVERY new occupant, so it overwrites unconditionally: a slot can never
+// inherit the previous player's id, even when map teardown dropped that player without a
+// ClientDisconnect. The later hooks only fill in a non-zero xuid for a human.
+static void S2_BeginClientXuid(int slot, uint64 xuid, bool fake) {
+    if (slot < 0 || slot >= kMaxClientSlots) return;
+    s_clientFake[slot] = fake;
+    s_clientXuid[slot] = fake ? 0 : xuid;        // bots report 0, as GetClientXUID did
+}
+static void S2_RecordClientXuid(int slot, uint64 xuid) {
+    if (slot < 0 || slot >= kMaxClientSlots || s_clientFake[slot] || xuid == 0) return;
+    s_clientXuid[slot] = xuid;
+}
+static uint64 S2_ControllerSteamId(int slot) {
+    static int s_off = -1;
+    if (s_off < 0) s_off = s2_schema_offset("CBasePlayerController", "m_steamID");
+    if (s_off < 0 || !s2_client_valid(slot)) return 0;
+    // The player controller for slot N is entity index N+1 on every Source 2 game.
+    void* ctrl = s2_ent_by_index(slot + 1);
+    if (!ctrl) return 0;
+    uint64 v = 0;
+    std::memcpy(&v, reinterpret_cast<const uint8_t*>(ctrl) + s_off, sizeof v);
+    return v;
+}
 static std::string s_steamidBuf;
 static const char* s2_client_steamid(int slot) {
-    if (!s_pEngine || slot < 0 || slot >= 64) { s_steamidBuf = "0"; return s_steamidBuf.c_str(); }
-    uint64 xuid = s_pEngine->GetClientXUID(CPlayerSlot(slot));   // 0 for bots / unauthenticated
+    if (slot < 0 || slot >= kMaxClientSlots) { s_steamidBuf = "0"; return s_steamidBuf.c_str(); }
+    uint64 xuid = s_clientXuid[slot];
+    if (xuid == 0 && !s_clientFake[slot]) xuid = S2_ControllerSteamId(slot);
     s_steamidBuf = std::to_string(xuid);
     return s_steamidBuf.c_str();
 }
 
 // ---------------------------------------------------------------------------
-// client_kick (Slice 6.3) — disconnect a client via IVEngineServer2::KickClient.
-// No-op for a null engine or an out-of-range slot (degrade-never-crash).
+// client_kick (Slice 6.3) — disconnect a client via IVEngineServer2::KickClient (a gamedata slot).
+// No-op for a null engine, an out-of-range slot, or a disabled slot (degrade-never-crash). A
+// disabled KickClient is the case this exists for: on the Oct 22 build the old slot was BanClient.
 // ---------------------------------------------------------------------------
 static void s2_client_kick(int slot, const char* reason) {
-    if (!s_pEngine || slot < 0 || slot >= 64) return;
-    s_pEngine->KickClient(CPlayerSlot(slot), reason ? reason : "Kicked by admin", NETWORK_DISCONNECT_KICKED);
+    if (slot < 0 || slot >= 64) return;
+    if (!S2Engine_KickClient(slot, reason ? reason : "Kicked by admin", NETWORK_DISCONNECT_KICKED)) {
+        static bool s_warned = false;
+        if (!s_warned) { s_warned = true;
+            META_CONPRINTF("[s2script] client_kick: IVEngineServer2_KickClient slot disabled — kick not delivered\n"); }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1880,7 +1984,8 @@ static uint64_t s_voiceCalls = 0, s_voiceRewrites = 0;   // hot-path counters (p
 // active; retried on every activation until it can run. Skips muted slots so our own pre-hook's
 // rewrite can't fake a mismatch. Pass -> proactive-apply enabled; fail -> named degrade.
 static void MaybeValidateVoiceListening() {
-    if (s_voiceListenValidated || s_voiceListenDegraded || !s_voiceListenHookInstalled || !s_pEngine) return;
+    if (s_voiceListenValidated || s_voiceListenDegraded || !s_voiceListenHookInstalled) return;
+    if (!s_engineCallsOk) return;
     int a = -1, b = -1;
     for (int i = 0; i < kMaxClientSlots; i++) {
         if (!s2_client_valid(i) || s_voiceMuted[i]) continue;
@@ -1888,18 +1993,19 @@ static void MaybeValidateVoiceListening() {
     }
     if (b < 0) return;   // need two un-muted occupied slots; try again on the next ClientActive
     // ENGINE PARAM TRANSPOSE (self-resolved on build 2000875, libengine2.so CEngineServer vtable via
-    // RTTI — GetClientListening is slot 90, SetClientListening 91, NEITHER drifted). The engine's
+    // RTTI — GetClientListening was slot 90, SetClientListening 91 there; both are gamedata now and
+    // moved to 91/92 on the Oct 22 2026 build). The engine's
     // getter and setter address OPPOSITE cells of the per-(owner,bit) listen matrix at client+0xbc8:
     //   SetClientListening(a,b,v)  writes cell(owner=b, bit=a)
     //   GetClientListening(a,b)    reads  cell(owner=a, bit=b)
     // The vendored eiface.h declares both (iReceiver,iSender), but the real getter's params are
     // reversed vs the setter. So read back Set(a,b)'s cell with Get(b,a). (The mute-enforcement path
     // s2_voice_set_muted already uses Set the engine's way and is unaffected.)
-    bool orig     = s_pEngine->GetClientListening(CPlayerSlot(b), CPlayerSlot(a));
-    s_pEngine->SetClientListening(CPlayerSlot(a), CPlayerSlot(b), !orig);
-    bool flipped  = s_pEngine->GetClientListening(CPlayerSlot(b), CPlayerSlot(a));
-    s_pEngine->SetClientListening(CPlayerSlot(a), CPlayerSlot(b), orig);
-    bool restored = s_pEngine->GetClientListening(CPlayerSlot(b), CPlayerSlot(a));
+    bool orig     = S2Engine_GetClientListening(b, a);
+    S2Engine_SetClientListening(a, b, !orig);
+    bool flipped  = S2Engine_GetClientListening(b, a);
+    S2Engine_SetClientListening(a, b, orig);
+    bool restored = S2Engine_GetClientListening(b, a);
     if (flipped == !orig && restored == orig) {
         s_voiceListenValidated = true;
         META_CONPRINTF("[s2script] VOICE VALIDATION: Get/SetClientListening round-trip OK (slots %d,%d)\n", a, b);
@@ -1919,10 +2025,10 @@ static int s2_voice_set_muted(int slot, int muted) {
     if (slot < 0 || slot >= kMaxClientSlots) return 0;
     s_voiceMuted[slot] = muted ? 1 : 0;
     if (!s_voiceListenHookInstalled || s_voiceListenDegraded) return 0;   // recorded but inert
-    if (muted && s_voiceListenValidated && s_pEngine) {
+    if (muted && s_voiceListenValidated) {
         for (int r = 0; r < kMaxClientSlots; r++) {
             if (r == slot || !s2_client_valid(r)) continue;
-            s_pEngine->SetClientListening(CPlayerSlot(r), CPlayerSlot(slot), false);
+            S2Engine_SetClientListening(r, slot, false);
         }
     }
     return 1;
@@ -1972,9 +2078,9 @@ static int s2_voice_audible_stats(uint64_t* out) {
 // fake client segfaults (mirrors the s2_client_print guard at :606).
 // ---------------------------------------------------------------------------
 static void s2_client_console_print(int slot, const char* msg) {
-    if (!s_pEngine || slot < 0 || slot >= 64) return;
-    if (!s_pEngine->GetPlayerNetInfo(CPlayerSlot(slot))) return;   // bot / no netchannel — skip (would segfault)
-    s_pEngine->ClientPrintf(CPlayerSlot(slot), msg ? msg : "");
+    if (slot < 0 || slot >= 64) return;
+    if (!S2Engine_GetPlayerNetInfo(slot)) return;   // bot / no netchannel — skip (would segfault)
+    S2Engine_ClientPrintf(slot, msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -1985,8 +2091,8 @@ static void s2_client_console_print(int slot, const char* msg) {
 static std::string s_addressBuf;
 static const char* s2_client_address(int slot) {
     s_addressBuf = "";
-    if (s_pEngine && slot >= 0 && slot < 64) {
-        INetChannelInfo* nci = s_pEngine->GetPlayerNetInfo(CPlayerSlot(slot));
+    if (slot >= 0 && slot < 64) {
+        INetChannelInfo* nci = S2Engine_GetPlayerNetInfo(slot);
         if (nci) { const char* a = nci->GetAddress(); if (a) s_addressBuf = a; }
     }
     return s_addressBuf.c_str();
@@ -1996,8 +2102,7 @@ static const char* s2_client_address(int slot) {
 // server_command / server_map_valid (Slice 6.4) — IVEngineServer2 passthroughs. Null/no-engine safe.
 // ---------------------------------------------------------------------------
 static void s2_server_command(const char* cmd) {
-    if (!s_pEngine || !cmd) return;
-    s_pEngine->ServerCommand(cmd);
+    S2Engine_ServerCommand(cmd);
 }
 // Client command execution (SourceMod ClientCommand / FakeClientCommand parity).
 //
@@ -2006,10 +2111,9 @@ static void s2_server_command(const char* cmd) {
 // Passing `cmd` directly would let a '%' in player-supplied text be read as a conversion specifier.
 // Neutralised here, once, rather than exposed to every plugin author.
 static int s2_client_command(int slot, const char* cmd) {
-    if (!s_pEngine || !cmd || !cmd[0]) return 0;
+    if (!cmd || !cmd[0]) return 0;
     if (slot < 0 || slot >= kMaxClientSlots) return 0;
-    s_pEngine->ClientCommand(CPlayerSlot(slot), "%s", cmd);
-    return 1;
+    return S2Engine_ClientCommand(slot, cmd) ? 1 : 0;
 }
 
 // `s2_client_fake_command` makes the SERVER process the command as if the client had sent it
@@ -2066,8 +2170,7 @@ static void s2_cvar_change_cb(ConVarRefAbstract* ref, CSplitScreenSlot /*slot*/,
 }
 
 static int s2_server_map_valid(const char* map) {
-    if (!s_pEngine || !map) return 0;
-    return s_pEngine->IsMapValid(map) ? 1 : 0;
+    return S2Engine_IsMapValid(map) ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2094,10 +2197,31 @@ static float s2_server_game_time() {
     return g ? g->curtime : 0.0f;
 }
 
-// Crash-reporter slice: the engine build number (IVEngineServer2::GetBuildVersion — a typed SDK
-// virtual on the already-acquired s_pEngine; engine-generic). 0 = interface unavailable (degrade).
+// Crash-reporter slice: the engine build number, read from the mod directory's steam.inf
+// (`ServerVersion=<n>`, e.g. 2000876 — the same number the treadmill and docs/re-strategy.md
+// quote). This used to be IVEngineServer2::GetBuildVersion at a compiled-in slot, which the Oct 22
+// 2026 update moved; a crash reporter must not be able to crash. steam.inf is a plain file every
+// Source 2 mod directory ships, so this stays engine-generic. 0 = unreadable (degrade). Parsed
+// once: the build cannot change under a running process.
+static std::string AddonRoot();
 static int s2_server_build_number(void) {
-    return s_pEngine ? s_pEngine->GetBuildVersion() : 0;
+    static int s_build = -1;
+    if (s_build >= 0) return s_build;
+    s_build = 0;
+    std::string root = AddonRoot();                       // <mod>/addons/s2script
+    if (root.empty()) return s_build;
+    char buf[4096];
+    snprintf(buf, sizeof buf, "%s", root.c_str());
+    std::string addons = dirname(buf);
+    snprintf(buf, sizeof buf, "%s", addons.c_str());
+    std::ifstream f(std::string(dirname(buf)) + "/steam.inf");
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.compare(0, 14, "ServerVersion=") != 0) continue;
+        s_build = std::atoi(line.c_str() + 14);
+        break;
+    }
+    return s_build;
 }
 
 // Crash-harness op (spec §10): a REAL fault in shim code, so the live gate exercises the exact
@@ -2919,8 +3043,8 @@ static const char* s2_translations_read(const char* lang, const char* name) {
     return s_translationsReadBuf.c_str();
 }
 static const char* s2_client_language(int slot) {
-    if (!s_pEngine || !s2_client_valid(slot)) return nullptr;
-    return s_pEngine->GetClientConVarValue(CPlayerSlot(slot), "cl_language");
+    if (!s2_client_valid(slot)) return nullptr;
+    return S2Engine_GetClientConVarValue(slot, "cl_language");
 }
 
 // ---------------------------------------------------------------------------
@@ -2962,8 +3086,8 @@ static void s2_request_hook(const char* descriptor, int enable) {
     }
     if (strcmp(descriptor, "GameEvent") == 0) {
         if (enable && !g_S2ScriptPlugin.m_eventHookInstalled && s_pGameEventManager) {
-            g_S2ScriptPlugin.m_eventHookInstalled = S2KHookAdd(g_hk.fireEvent, s_pGameEventManager,
-                &IGameEventManager2::FireEvent, "FireEvent");
+            g_S2ScriptPlugin.m_eventHookInstalled = S2KHookAddSlot(g_hk.fireEvent, s_pGameEventManager,
+                kHS_FireEvent, "FireEvent");
         } else if (!enable && g_S2ScriptPlugin.m_eventHookInstalled) {
             g_hk.fireEvent.Remove(s_pGameEventManager);
             g_S2ScriptPlugin.m_eventHookInstalled = false;
@@ -3083,6 +3207,186 @@ static void GamedataResult(const char* name, bool ok, const char* reason) {
 void S2GamedataResult(const char* name, bool ok, const char* reason) {
     GamedataResult(name, ok, reason);
 }
+// ---------------------------------------------------------------------------
+// S2_VerifyVtableSlots — turn gamedata hook indices into verified slots.
+//
+// Every KHook on an engine interface takes its vtable index from a gamedata/core offset
+// ("<Interface>_<Function>"), the way Swiftly and Source2Mod keep theirs. Called once per interface
+// object, right after it is acquired and BEFORE anything hooks it. Each slot must pass two checks
+// or it stays disabled (-1) with a named `gamedata FAIL` line, which also counts in the GAMEDATA
+// VALIDATION banner:
+//
+//   1. LAYOUT PIN. `<Interface>_vtableSize` is the slot count of the live vtable the indices were
+//      verified against. An inserted or removed virtual changes it, and when it changes NO index
+//      can be trusted — the Oct 22 2026 update inserted one at IVEngineServer2 slot 65 and moved
+//      every later slot by one. So a mismatch disables every slot of that interface (strict, by
+//      choice: a wrong hook reads another function's arguments as its own). The fix is a
+//      gamedata/core/custom/ edit, never a rebuild.
+//   2. RANGE. The index is inside that vtable and the ORIGINAL target (looked through any KHook on
+//      the slot — Metamod gives every plugin the same KHook, so that covers other plugins' hooks
+//      too) lies in the owning module's code.
+//
+// The live count is the run of entries that point at executable memory. That is the module's own
+// code, or a trampoline some other hook library patched in (its pages are executable too). What
+// ends a vtable is the next group's offset-to-top and type_info pointer, and neither of those is
+// executable. Counting only the module's code would let one foreign hook truncate the count and
+// disable a whole interface.
+// ---------------------------------------------------------------------------
+struct S2VtableLayout {
+    const char* iface;         // for the log lines
+    const char* module;        // the module whose code the original targets must lie in
+    const char* pinKey;        // gamedata/core offsets entry holding the live slot count
+};
+
+// Executable mappings, read once per verification pass: /proc/self/maps is the kernel's own
+// answer, and this runs a handful of times at boot.
+static std::vector<std::pair<uintptr_t, uintptr_t>> S2ExecRanges() {
+    std::vector<std::pair<uintptr_t, uintptr_t>> out;
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return out;
+    char line[4096];   // PATH_MAX: a longer line would split and its tail fail the parse below
+    while (fgets(line, sizeof line, f)) {
+        unsigned long long lo = 0, hi = 0;
+        char perms[5] = {};
+        if (sscanf(line, "%llx-%llx %4s", &lo, &hi, perms) == 3 && perms[2] == 'x')
+            out.emplace_back(static_cast<uintptr_t>(lo), static_cast<uintptr_t>(hi));
+    }
+    fclose(f);
+    return out;
+}
+
+// out[i] is keys[i]'s verified index or -1. Returns whether the live layout matched its pin.
+static bool S2_VerifyVtableSlots(const S2VtableLayout& layout, const void* obj,
+                                 const char* const* keys, int n, int* out) {
+    for (int i = 0; i < n; i++) out[i] = -1;
+    if (!obj) return false;   // interface missing: already reported, every dependent op degrades
+
+    void** vt = *reinterpret_cast<void** const*>(obj);
+    ModText mt = FindModuleText(layout.module);
+    auto inText = [&](const void* p) {
+        auto* b = static_cast<const uint8_t*>(p);
+        return mt.text && b >= mt.text && b < mt.text + mt.size;
+    };
+    const auto exec = S2ExecRanges();
+    auto executable = [&](const void* p) {
+        const auto a = reinterpret_cast<uintptr_t>(p);
+        for (const auto& r : exec)
+            if (a >= r.first && a < r.second) return true;
+        return inText(p);
+    };
+    auto original = [&](int i) { return KHook::FindOriginalVirtual(vt, i); };
+
+    // Bounded like every other vtable walk in the shim.
+    int live = 0;
+    if (mt.text)
+        while (live < 1024 && executable(original(live))) live++;
+
+    auto offs = s_gdCore.offsets.find(layout.pinKey);
+    const int pinned = offs != s_gdCore.offsets.end() ? offs->second : -1;
+    const bool layoutOk = mt.text && pinned > 0 && live == pinned;
+    META_CONPRINTF("[s2script] %s: live vtable %d slots, gamedata pin %d%s\n", layout.iface, live, pinned,
+                   layoutOk ? "" : " — MISMATCH: disabled until gamedata is re-verified");
+
+    int verified = 0;
+    for (int e = 0; e < n; e++) {
+        char reason[512];
+        auto it = s_gdCore.offsets.find(keys[e]);
+        const int idx = it != s_gdCore.offsets.end() ? it->second : -1;
+        if (!mt.text) {
+            snprintf(reason, sizeof reason, "%s code not found — slot disabled", layout.module);
+            GamedataResult(keys[e], false, reason);
+            continue;
+        }
+        if (idx < 0) {
+            GamedataResult(keys[e], false, "offset (vtable index) key absent from gamedata — slot disabled");
+            continue;
+        }
+        if (!layoutOk) {
+            snprintf(reason, sizeof reason,
+                     "%s has %d slots but gamedata was verified against %d — the layout moved; slot "
+                     "disabled. Re-verify %s (index %d, verified for the OLD layout) and set %s in "
+                     "gamedata/core/custom/",
+                     layout.iface, live, pinned, keys[e], idx, layout.pinKey);
+            GamedataResult(keys[e], false, reason);
+            continue;
+        }
+        if (idx >= live) {
+            snprintf(reason, sizeof reason, "index %d is past the end of the %d-slot vtable — slot disabled",
+                     idx, live);
+            GamedataResult(keys[e], false, reason);
+            continue;
+        }
+        if (!inText(original(idx))) {
+            snprintf(reason, sizeof reason,
+                     "slot %d points outside %s and no KHook original was found — slot disabled", idx,
+                     layout.module);
+            GamedataResult(keys[e], false, reason);
+            continue;
+        }
+        out[e] = idx;
+        verified++;
+        GamedataResult(keys[e], true, nullptr);
+    }
+    if (n > 0) META_CONPRINTF("[s2script] %s: %d/%d hook slots verified\n", layout.iface, verified, n);
+    return layoutOk;
+}
+
+// Rows are grouped by interface; kHookGroups below gives each group's [first, last] range.
+static const char* const kHookSlotKeys[kHS_Count] = {
+    "ISource2Server_GameFrame",
+    "ISource2ServerConfig_Shutdown",
+    "ISource2ServerConfig_PreShutdown",
+    "ISource2GameClients_OnClientConnected",
+    "ISource2GameClients_ClientPutInServer",
+    "ISource2GameClients_ClientActive",
+    "ISource2GameClients_ClientFullyConnect",
+    "ISource2GameClients_ClientDisconnect",
+    "ISource2GameClients_ClientCommand",
+    "ISource2GameClients_ClientSettingsChanged",
+    "ISource2GameClients_ClientVoice",
+    "ISource2GameEntities_CheckTransmit",
+    "IGameEventManager2_FireEvent",
+    "IGameEventSystem_PostEventAbstract",
+    "INetworkServerService_StartupServer",
+    "ICvar_DispatchConCommand",
+    "IVEngineServer2_SetClientListening",
+};
+static_assert(sizeof(kHookSlotKeys) / sizeof(kHookSlotKeys[0]) == kHS_Count,
+              "one gamedata key per S2HookSlot");
+
+enum S2HookGroup {
+    kHG_Server, kHG_ServerConfig, kHG_GameClients, kHG_GameEntities, kHG_GameEventManager,
+    kHG_GameEventSystem, kHG_NetworkServerService, kHG_Cvar, kHG_EngineServer, kHG_Count
+};
+struct S2HookGroupSpec { S2VtableLayout layout; S2HookSlot first, last; };
+static const S2HookGroupSpec kHookGroups[kHG_Count] = {
+    { { "ISource2Server",        "libserver.so",  "ISource2Server_vtableSize" },        kHS_GameFrame,            kHS_GameFrame },
+    { { "ISource2ServerConfig",  "libserver.so",  "ISource2ServerConfig_vtableSize" },  kHS_ServerConfigShutdown, kHS_ServerConfigPreShutdown },
+    { { "ISource2GameClients",   "libserver.so",  "ISource2GameClients_vtableSize" },   kHS_OnClientConnected,    kHS_ClientVoice },
+    { { "ISource2GameEntities",  "libserver.so",  "ISource2GameEntities_vtableSize" },  kHS_CheckTransmit,        kHS_CheckTransmit },
+    { { "IGameEventManager2",    "libserver.so",  "IGameEventManager2_vtableSize" },    kHS_FireEvent,            kHS_FireEvent },
+    { { "IGameEventSystem",      "libengine2.so", "IGameEventSystem_vtableSize" },      kHS_PostEventAbstract,    kHS_PostEventAbstract },
+    { { "INetworkServerService", "libengine2.so", "INetworkServerService_vtableSize" }, kHS_StartupServer,        kHS_StartupServer },
+    { { "ICvar",                 "libtier0.so",   "ICvar_vtableSize" },                 kHS_DispatchConCommand,   kHS_DispatchConCommand },
+    { { "IVEngineServer2",       "libengine2.so", "IVEngineServer2_vtableSize" },       kHS_SetClientListening,   kHS_SetClientListening },
+};
+
+static bool S2_ResolveHookSlots(S2HookGroup g, const void* obj) {
+    const S2HookGroupSpec& spec = kHookGroups[g];
+    return S2_VerifyVtableSlots(spec.layout, obj, &kHookSlotKeys[spec.first], spec.last - spec.first + 1,
+                                &s_hookSlot[spec.first]);
+}
+
+// The IVEngineServer2 layout gates the compiled engine calls too (see S2EngineCalls): the same pin
+// that says "these hook indices were verified" says "this build's header matches the binary".
+static void S2_CheckEngineLayout() {
+    s_engineCallsOk = S2_ResolveHookSlots(kHG_EngineServer, s_pEngine);
+    if (s_pEngine && !s_engineCallsOk)
+        META_CONPRINTF("[s2script] ERROR: IVEngineServer2 layout differs from the one this build was "
+                       "compiled against — engine calls (kick, print, userid, client convars, voice) are "
+                       "DISABLED until a build with the updated SDK header ships\n");
+}
+
 // Resolve a "direct"/"ctor-body-xref"/"lea-disp" signature AND verify it matches UNIQUELY (Rule 2): 0 = the
 // pattern moved (stale), >1 = ambiguous. Records the result and returns the resolved module offset, or kFail.
 static int64_t ResolveSigValidated(const char* name, const SigSpec& sig) {
@@ -3831,7 +4135,7 @@ static int s2_sound_emit(const char* soundName, int entIndex, int entSerial,
     for (int i = 0; i < slotCount; i++) {
         int slot = slots[i];
         if (slot < 0 || slot >= 64) continue;
-        if (!s_pEngine || !s_pEngine->GetPlayerNetInfo(CPlayerSlot(slot))) continue;   // bot-skip
+        if (!S2Engine_GetPlayerNetInfo(slot)) continue;   // bot-skip
         filter.AddRecipient(slot);
     }
     // An all-bot-skipped filter (Count()==0) is NOT a degrade — call the engine anyway (plays to
@@ -4140,7 +4444,8 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
     g_shutdownHookInstalled = false;
     m_frameDispatchRequested = false;
     m_coreDispatchReady = false;
-    S2KHookLogInterfaceVtables();
+    for (int& slot : s_hookSlot) slot = -1;
+    s_engineCallsOk = false;
     s_gdOk = 0; s_gdFail = 0;   // reset the gamedata validation report for this Load
     s_pPulseFirstArgumentToVariant = nullptr;
 
@@ -4270,14 +4575,18 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
             m_server = serverFactory
                 ? reinterpret_cast<ISource2Server*>(serverFactory(verStr, &ret))
                 : nullptr;
+            if (m_serverConfig && configRet == 0) S2_ResolveHookSlots(kHG_ServerConfig, m_serverConfig);
             if (m_server && ret == 0) {
                 META_CONPRINTF("[s2script] interface OK: Source2Server (%s)\n", verStr);
+                S2_ResolveHookSlots(kHG_Server, m_server);
                 // This always-on filter is also the post-loader bootstrap for terminal lifecycle
                 // hooks. Core frame dispatch remains independently subscription-gated.
                 // Everything per-frame in the core hangs off this hook: the plugin loader, timers,
                 // async results, the startup plugins.json update. Say whether it took, and why not.
-                const S2HookReceipt frameHook = KHook::GetVtableIndex(&ISource2Server::GameFrame) == -1
-                    ? S2HookReceipt{KHook::INVALID_HOOK, S2HookState::Failed, "GetVtableIndex=-1"}
+                if (s_hookSlot[kHS_GameFrame] >= 0) g_hk.gameFrame.Configure(s_hookSlot[kHS_GameFrame]);
+                const S2HookReceipt frameHook = s_hookSlot[kHS_GameFrame] < 0
+                    ? S2HookReceipt{KHook::INVALID_HOOK, S2HookState::Failed,
+                                    "ISource2Server_GameFrame slot unverified — see the gamedata FAIL line above"}
                     : g_hk.gameFrame.Add(m_server);
                 m_frameHookInstalled = frameHook.Accepted();
                 if (m_frameHookInstalled) {
@@ -4303,24 +4612,25 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
                 ? reinterpret_cast<ISource2GameClients*>(serverFactory(verStr, &ret)) : nullptr;
             if (m_gameClients && ret == 0) {
                 META_CONPRINTF("[s2script] interface OK: Source2GameClients (%s)\n", verStr);
-                m_clientCmdHookInstalled = S2KHookAdd(g_hk.clientCommand, m_gameClients,
-                    &ISource2GameClients::ClientCommand, "ClientCommand");
+                S2_ResolveHookSlots(kHG_GameClients, m_gameClients);
+                m_clientCmdHookInstalled = S2KHookAddSlot(g_hk.clientCommand, m_gameClients,
+                    kHS_ClientCommand, "ClientCommand");
                 if (m_clientCmdHookInstalled) {
                     META_CONPRINTF("[s2script] ClientCommand hook installed (player console commands)\n");
                 }
                 // @s2script/clients: six notify lifecycle hooks -> s2script_core_dispatch_client_event.
-                const bool lifeConnected = S2KHookAdd(g_hk.onClientConnected, m_gameClients,
-                    &ISource2GameClients::OnClientConnected, "OnClientConnected");
-                const bool lifePutIn = S2KHookAdd(g_hk.clientPutInServer, m_gameClients,
-                    &ISource2GameClients::ClientPutInServer, "ClientPutInServer");
-                const bool lifeActive = S2KHookAdd(g_hk.clientActive, m_gameClients,
-                    &ISource2GameClients::ClientActive, "ClientActive");
-                const bool lifeFully = S2KHookAdd(g_hk.clientFullyConnect, m_gameClients,
-                    &ISource2GameClients::ClientFullyConnect, "ClientFullyConnect");
-                const bool lifeDisconnect = S2KHookAdd(g_hk.clientDisconnect, m_gameClients,
-                    &ISource2GameClients::ClientDisconnect, "ClientDisconnect");
-                const bool lifeSettings = S2KHookAdd(g_hk.clientSettingsChanged, m_gameClients,
-                    &ISource2GameClients::ClientSettingsChanged, "ClientSettingsChanged");
+                const bool lifeConnected = S2KHookAddSlot(g_hk.onClientConnected, m_gameClients,
+                    kHS_OnClientConnected, "OnClientConnected");
+                const bool lifePutIn = S2KHookAddSlot(g_hk.clientPutInServer, m_gameClients,
+                    kHS_ClientPutInServer, "ClientPutInServer");
+                const bool lifeActive = S2KHookAddSlot(g_hk.clientActive, m_gameClients,
+                    kHS_ClientActive, "ClientActive");
+                const bool lifeFully = S2KHookAddSlot(g_hk.clientFullyConnect, m_gameClients,
+                    kHS_ClientFullyConnect, "ClientFullyConnect");
+                const bool lifeDisconnect = S2KHookAddSlot(g_hk.clientDisconnect, m_gameClients,
+                    kHS_ClientDisconnect, "ClientDisconnect");
+                const bool lifeSettings = S2KHookAddSlot(g_hk.clientSettingsChanged, m_gameClients,
+                    kHS_ClientSettingsChanged, "ClientSettingsChanged");
                 // OR so Unload still drops this-filters if a named fail skipped some Adds.
                 m_clientLifecycleHooksInstalled =
                     lifeConnected || lifePutIn || lifeActive || lifeFully || lifeDisconnect || lifeSettings;
@@ -4328,8 +4638,8 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
                     META_CONPRINTF("[s2script] client lifecycle hooks installed (6 notify)\n");
                 }
                 // Voice-control slice: the 7th sibling — throttled voice-packet notify. POST callback.
-                s_voiceNotifyHookInstalled = S2KHookAdd(g_hk.clientVoice, m_gameClients,
-                    &ISource2GameClients::ClientVoice, "ClientVoice");
+                s_voiceNotifyHookInstalled = S2KHookAddSlot(g_hk.clientVoice, m_gameClients,
+                    kHS_ClientVoice, "ClientVoice");
                 if (s_voiceNotifyHookInstalled) {
                     META_CONPRINTF("[s2script] voice: ClientVoice hook installed (throttled notify)\n");
                 }
@@ -4362,8 +4672,9 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
             s_transmitNsLast = 0; s_transmitNsMax = 0;
             if (m_gameEntities && ret == 0 && s_ctiClientOff >= 0 && m_clientLifecycleHooksInstalled) {
                 META_CONPRINTF("[s2script] interface OK: Source2GameEntities (%s)\n", verStr);
-                m_checkTransmitHookInstalled = S2KHookAdd(g_hk.checkTransmit, m_gameEntities,
-                    &ISource2GameEntities::CheckTransmit, "CheckTransmit");
+                S2_ResolveHookSlots(kHG_GameEntities, m_gameEntities);
+                m_checkTransmitHookInstalled = S2KHookAddSlot(g_hk.checkTransmit, m_gameEntities,
+                    kHS_CheckTransmit, "CheckTransmit");
                 if (m_checkTransmitHookInstalled) {
                     META_CONPRINTF("[s2script] CheckTransmit hook installed (entity visibility; "
                                    "layout validates on first fire)\n");
@@ -4394,6 +4705,7 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
                 : nullptr;
             if (s_pCvar && ret == 0) {
                 META_CONPRINTF("[s2script] interface OK: EngineCvar (%s)\n", verStr);
+                S2_ResolveHookSlots(kHG_Cvar, s_pCvar);
                 // One global change callback for the whole framework; core fans it out to whichever
                 // plugins subscribed. Unconditional (like the FireOutputInternal detour) so there is
                 // no per-subscribe engine work — and removed in Unload, because leaving a callback
@@ -4404,8 +4716,8 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
                 // The ConCommand-listener seam (see Hook_DispatchConCommand). Unconditional, like
                 // the change callback above: the core decides per-name whether anyone is listening,
                 // so there is no per-subscribe engine work.
-                s_conCmdDispatchHookInstalled = S2KHookAdd(g_hk.dispatchConCommand, s_pCvar,
-                    &ICvar::DispatchConCommand, "DispatchConCommand");
+                s_conCmdDispatchHookInstalled = S2KHookAddSlot(g_hk.dispatchConCommand, s_pCvar,
+                    kHS_DispatchConCommand, "DispatchConCommand");
                 if (s_conCmdDispatchHookInstalled) {
                     META_CONPRINTF("[s2script] DispatchConCommand hook installed (command listeners)\n");
                 }
@@ -4424,16 +4736,20 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
                 : nullptr;
             if (s_pEngine && ret == 0) {
                 META_CONPRINTF("[s2script] interface OK: EngineToServer (%s)\n", verStr);
-                // Voice-control slice: the mute-enforcement rewrite hook. Enforcement stays gated on
-                // the runtime validation (first-fire sanity here, Get/Set round-trip at 2nd
-                // ClientActive) because the eiface vtable region is hand-patched.
-                s_voiceListenHookInstalled = S2KHookAdd(g_hk.setClientListening, s_pEngine,
-                    &IVEngineServer2::SetClientListening, "SetClientListening");
+                // The live layout gates the compiled engine calls and verifies the hook slot below,
+                // before the first call or hook (see S2_CheckEngineLayout).
+                S2_CheckEngineLayout();
+                // Voice-control slice: the mute-enforcement rewrite hook, on its verified gamedata
+                // slot. Enforcement stays gated on the runtime validation (first-fire sanity here,
+                // Get/Set round-trip at 2nd ClientActive) as a second, behavioural check.
+                s_voiceListenHookInstalled = S2KHookAddSlot(g_hk.setClientListening, s_pEngine,
+                    kHS_SetClientListening, "SetClientListening");
                 if (s_voiceListenHookInstalled) {
                     META_CONPRINTF("[s2script] voice: SetClientListening hook installed (mute enforcement)\n");
                 }
             } else {
                 s_pEngine = nullptr;
+                S2_CheckEngineLayout();   // gates every engine call off
                 META_CONPRINTF("[s2script] WARN: interface MISSING: EngineToServer (%s) — client_print degrades\n", verStr);
             }
         }
@@ -4448,6 +4764,7 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
                 : nullptr;
             if (s_pGameEventSystem && ret == 0) {
                 META_CONPRINTF("[s2script] interface OK: GameEventSystem (%s)\n", verStr);
+                S2_ResolveHookSlots(kHG_GameEventSystem, s_pGameEventSystem);
             } else {
                 s_pGameEventSystem = nullptr;
                 META_CONPRINTF("[s2script] WARN: interface MISSING: GameEventSystem (%s) — client_print chat degrades\n", verStr);
@@ -4477,11 +4794,11 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
             s_pNetworkServerService = engineFactory ? engineFactory(verStr, &ret) : nullptr;
             if (s_pNetworkServerService && ret == 0) {
                 META_CONPRINTF("[s2script] interface OK: NetworkServerService (%s)\n", verStr);
+                S2_ResolveHookSlots(kHG_NetworkServerService, s_pNetworkServerService);
                 // OnMapStart (clientlist-fakeconvar-onmapstart slice): POST hook StartupServer on the
                 // just-acquired NetworkServerService — the CSSharp OnMapStart mechanism.
-                m_startupServerHookInstalled = S2KHookAdd(g_hk.startupServer,
-                    static_cast<INetworkServerService*>(s_pNetworkServerService),
-                    &INetworkServerService::StartupServer, "StartupServer");
+                m_startupServerHookInstalled = S2KHookAddSlot(g_hk.startupServer,
+                    static_cast<INetworkServerService*>(s_pNetworkServerService), kHS_StartupServer, "StartupServer");
             } else {
                 s_pNetworkServerService = nullptr;
                 META_CONPRINTF("[s2script] WARN: interface MISSING: NetworkServerService (%s) — identity natives degrade\n", verStr);
@@ -4560,6 +4877,7 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
                     s_pGameEventManager = reinterpret_cast<IGameEventManager2*>(
                         const_cast<uint8_t*>(mt.text) + targetOff);
                     META_CONPRINTF("[s2script] interface OK: GameEventManager (%p)\n", (void*)s_pGameEventManager);
+                    S2_ResolveHookSlots(kHG_GameEventManager, s_pGameEventManager);
                 } else {
                     s_pGameEventManager = nullptr;   // ResolveSigValidated already recorded the failure reason
                 }
@@ -5046,15 +5364,16 @@ bool S2ScriptPlugin::Load(PluginId id, ISmmAPI* ismm, char* error, size_t maxlen
 
     // Late-load bootstrap. CPlayerUserId stores ushort; -1 is represented by 65535.
     // A userid proves occupancy, not exact signon phase: use connected conservatively.
-    if (s_pEngine) {
+    // Gated on the engine-call layout, not just the interface: gated off, every slot reads absent.
+    if (s_engineCallsOk) {
         S2ClientBootstrap(kMaxClientSlots, CPlayerUserId(-1).Get(),
-            [](int slot) { return s_pEngine->GetPlayerUserId(CPlayerSlot(slot)).Get(); },
+            [](int slot) { return S2Engine_GetPlayerUserId(slot); },
             [](int slot) {
                 if (s_trackedSignon[slot] < kSignonConnected) s_trackedSignon[slot] = kSignonConnected;
                 s2script_core_client_ensure(slot);
             });
     } else {
-        META_CONPRINTF("[s2script] client lifecycle: bootstrap unavailable (engine interface missing)\n");
+        META_CONPRINTF("[s2script] client lifecycle: bootstrap unavailable (IVEngineServer2_GetPlayerUserId unavailable)\n");
     }
 
     // Declarative inbound hooks: hand the engine-free policy TU its ONE outside contact — core's
@@ -5361,15 +5680,10 @@ static void S2InstallLifecycleHooks() {
     // Load/AllPluginsLoaded are too early: KHook restores this shared vtable page RX while the
     // stock loader still has a pending Disconnect-slot write. First accepted GameFrame proves
     // that loader initialization and its write have completed.
-    using ServerConfigLifecycleMfp = void (ISource2ServerConfig::*)();
-    g_preShutdownHookInstalled = S2KHookAdd(g_hk.serverConfigPreShutdown,
-        g_S2ScriptPlugin.m_serverConfig,
-        static_cast<ServerConfigLifecycleMfp>(&ISource2ServerConfig::PreShutdown),
-        "PreShutdown terminal marker");
-    g_shutdownHookInstalled = S2KHookAdd(g_hk.serverConfigShutdown,
-        g_S2ScriptPlugin.m_serverConfig,
-        static_cast<ServerConfigLifecycleMfp>(&ISource2ServerConfig::Shutdown),
-        "Shutdown terminal marker");
+    g_preShutdownHookInstalled = S2KHookAddSlot(g_hk.serverConfigPreShutdown,
+        g_S2ScriptPlugin.m_serverConfig, kHS_ServerConfigPreShutdown, "PreShutdown terminal marker");
+    g_shutdownHookInstalled = S2KHookAddSlot(g_hk.serverConfigShutdown,
+        g_S2ScriptPlugin.m_serverConfig, kHS_ServerConfigShutdown, "Shutdown terminal marker");
     META_CONPRINTF("[s2script] terminal lifecycle hooks pre=%d shutdown=%d owner_tid=%ld install_tid=%ld\n",
                    g_preShutdownHookInstalled ? 1 : 0, g_shutdownHookInstalled ? 1 : 0,
                    g_coreOwnerTid, S2Tid());
@@ -5719,33 +6033,38 @@ KHook::Return<void> S2ScriptPlugin::Hook_ClientCommand(ISource2GameClients* clie
 static void S2_ClearClientSlotState(int slot) {
     if (slot < 0 || slot >= kMaxClientSlots) return;
     s_trackedSignon[slot] = kSignonNone;
+    s_clientXuid[slot] = 0;
+    s_clientFake[slot] = false;
     s_voiceMuted[slot] = 0;
     s_voiceLastNotify[slot] = 0;
     s_voiceAudible[slot] = 0;
     s_voiceHasRule &= ~(1ull << slot);
 }
 
-KHook::Return<void> S2ScriptPlugin::Hook_OnClientConnected(ISource2GameClients* clients, CPlayerSlot slot, const char*, unsigned long long, const char*, const char*, bool) {
+KHook::Return<void> S2ScriptPlugin::Hook_OnClientConnected(ISource2GameClients* clients, CPlayerSlot slot, const char*, unsigned long long xuid, const char*, const char*, bool fakePlayer) {
     auto obs = g_hk.onClientConnected.Observe(clients);
     if (!S2Hook_EnterDispatch(obs)) return S2_Ignore();
     int s = slot.Get();
     if (s >= 0 && s < kMaxClientSlots) s_trackedSignon[s] = kSignonConnected;
+    S2_BeginClientXuid(s, xuid, fakePlayer);   // before dispatch: basebans reads it in "connect"
     S2_DispatchClientEvent("connect", s, s2script_core_client_begin(s));
     return S2_Ignore();
 }
-KHook::Return<void> S2ScriptPlugin::Hook_ClientPutInServer(ISource2GameClients* clients, CPlayerSlot slot, const char*, int, unsigned long long) {
+KHook::Return<void> S2ScriptPlugin::Hook_ClientPutInServer(ISource2GameClients* clients, CPlayerSlot slot, const char*, int, unsigned long long xuid) {
     auto obs = g_hk.clientPutInServer.Observe(clients);
     if (!S2Hook_EnterDispatch(obs)) return S2_Ignore();
     int s = slot.Get();
     if (s >= 0 && s < kMaxClientSlots) s_trackedSignon[s] = kSignonSpawn;
+    S2_RecordClientXuid(s, xuid);
     S2_DispatchClientEvent("putinserver", s, s2script_core_client_ensure(s));
     return S2_Ignore();
 }
-KHook::Return<void> S2ScriptPlugin::Hook_ClientActive(ISource2GameClients* clients, CPlayerSlot slot, bool, const char*, unsigned long long) {
+KHook::Return<void> S2ScriptPlugin::Hook_ClientActive(ISource2GameClients* clients, CPlayerSlot slot, bool, const char*, unsigned long long xuid) {
     auto obs = g_hk.clientActive.Observe(clients);
     if (!S2Hook_EnterDispatch(obs)) return S2_Ignore();
     int s = slot.Get();
     if (s >= 0 && s < kMaxClientSlots) s_trackedSignon[s] = kSignonFull;
+    S2_RecordClientXuid(s, xuid);
     MaybeValidateVoiceListening();   // one-shot Get/Set round-trip once two clients are active
     S2_DispatchClientEvent("active", s, s2script_core_client_ensure(s));
     return S2_Ignore();
@@ -5758,10 +6077,11 @@ KHook::Return<void> S2ScriptPlugin::Hook_ClientFullyConnect(ISource2GameClients*
     S2_DispatchClientEvent("fullyconnect", s, s2script_core_client_ensure(s));
     return S2_Ignore();
 }
-KHook::Return<void> S2ScriptPlugin::Hook_ClientDisconnect(ISource2GameClients* clients, CPlayerSlot slot, ENetworkDisconnectionReason, const char*, unsigned long long, const char*) {
+KHook::Return<void> S2ScriptPlugin::Hook_ClientDisconnect(ISource2GameClients* clients, CPlayerSlot slot, ENetworkDisconnectionReason, const char*, unsigned long long xuid, const char*) {
     auto obs = g_hk.clientDisconnect.Observe(clients);
     if (!S2Hook_EnterDispatch(obs)) return S2_Ignore();
     int s = slot.Get();
+    S2_RecordClientXuid(s, xuid);   // the departing identity snapshot below reads it
     // Copy every string now: callbacks may re-enter engine code or replace the occupant.
     const uint64_t token = s2script_core_client_generation(s);
     auto copy = [](const char* p) { return std::string(p ? p : ""); };
@@ -5837,6 +6157,8 @@ KHook::Return<bool> S2ScriptPlugin::Hook_SetClientListening(IVEngineServer2* eng
             }
         }
         if (deny) {
+            // The member pointer only supplies the TYPE: Recall calls the address KHook hands back
+            // for the hooked slot, so the compiled-in eiface.h index plays no part.
             KHook::Recall(&IVEngineServer2::SetClientListening,
                           KHook::Return<bool>{ KHook::Action::Ignore, bListen },
                           engine, receiver, sender, false);
@@ -5860,9 +6182,10 @@ KHook::Return<void> S2ScriptPlugin::Hook_StartupServer(INetworkServerService* ns
     // This is the POST StartupServer hook: read the new server's occupancy, not the previous
     // map's tracked signon. Map teardown can remove clients without a disconnect callback.
     // Retire only absent slots; actual survivors keep their connection generation and policy.
-    if (s_pEngine) {
+    // Gated on the engine-call layout: gated off, every slot would read absent and be retired.
+    if (s_engineCallsOk) {
         S2ClientReconcile(kMaxClientSlots, CPlayerUserId(-1).Get(),
-            [](int slot) { return s_pEngine->GetPlayerUserId(CPlayerSlot(slot)).Get(); },
+            [](int slot) { return S2Engine_GetPlayerUserId(slot); },
             [](int slot) {
                 // StartupServer may repeat without new lifecycle callbacks. Retain observed
                 // phase; occupancy supplies only a connected floor for previously unknown slots.
