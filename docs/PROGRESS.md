@@ -1082,3 +1082,22 @@ uint8; 0 means none).
 
 A core test covers the value mapping, misses, a stale ref and missing ops. The live gate is
 pending.
+## 2026-10-26 — Sound event parameters
+
+ModSharp exposes StartSoundEvent, SetSoundEventParam and StopSoundEvent: plugins fade music, move
+a looping sound with its source, or retune the pitch of a sound that is already playing. Sound
+events exist in every Source 2 game, so this is core.
+
+`Sound.start` reuses the `sound_emit` op, which now also returns the event's stack hash. The core
+EmitSound function initializes a 20-byte StartSoundEventInfo_t in its sret (guid at 0, stack hash
+at 4, flags at 8, a u64 recipient mask at 12); our old struct read only the guid and had the hash
+in the wrong place. SetSoundEventParam needs both. The shim resolves
+`SoundOpGameSystem::SetSoundEventParam` and
+`SoundOpGameSystem::StopSoundEvent` from gamedata/core, both unique on the Oct 22 libserver.so, and
+finds the SoundOpGameSystem instance by name through the game-system factory list at call time.
+
+The value is a CSosFieldData: a float, or a float3 whose floats sit behind a pointer. The engine
+builds the same header for the position it sets inside EmitSound and frees that pointer itself, so
+the shim keeps the value on its stack. The engine reports nothing back; an unknown parameter name
+is dropped silently. `GetSoundDuration` and `IsSoundEventValid` need CSoundEventManager from
+libsoundsystem.so and are left for a later slice. Live gate pending.

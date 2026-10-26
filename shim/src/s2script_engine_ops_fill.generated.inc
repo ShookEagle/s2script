@@ -204,3 +204,6 @@
     ops.entity_get_bone_transform = &Shim_EntityGetBoneTransform;
     ops.entity_lookup_attachment = &Shim_EntityLookupAttachment;
     ops.entity_get_attachment = &Shim_EntityGetAttachment;
+    // --- sound event parameters: SoundOpGameSystem::SetSoundEventParam / StopSoundEvent ---
+    ops.sound_set_param = &s2_sound_set_param;
+    ops.sound_stop_event = &s2_sound_stop_event;

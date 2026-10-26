@@ -182,7 +182,7 @@ pub type CollisionActivateFn = extern "C" fn(c_int, c_int) -> c_int;
 pub type EntitySetModelFn = extern "C" fn(c_int, c_int, *const std::os::raw::c_char) -> c_int;
 pub type EntityListenerInstallFn = extern "C" fn() -> c_int;
 pub type EntityNameFn = extern "C" fn(c_int, c_int) -> *const c_char;
-pub type SoundEmitFn = extern "C" fn(*const c_char, c_int, c_int, *const c_int, c_int, f32) -> c_int;
+pub type SoundEmitFn = extern "C" fn(*const c_char, c_int, c_int, *const c_int, c_int, f32, *mut c_int) -> c_int;
 pub type SoundPrecacheAddFn = extern "C" fn(*const c_char) -> c_int;
 pub type UsercmdHookInstallFn = extern "C" fn() -> c_int;
 pub type UsercmdReadFn = extern "C" fn(c_int) -> f64;
@@ -270,6 +270,8 @@ pub type EntityLookupBoneFn = extern "C" fn(index: c_int, serial: c_int, name: *
 pub type EntityGetBoneTransformFn = extern "C" fn(index: c_int, serial: c_int, bone: c_int, out: *mut f32) -> c_int;
 pub type EntityLookupAttachmentFn = extern "C" fn(index: c_int, serial: c_int, name: *const c_char) -> c_int;
 pub type EntityGetAttachmentFn = extern "C" fn(index: c_int, serial: c_int, attachment: c_int, out: *mut f32) -> c_int;
+pub type SoundSetParamFn = extern "C" fn(c_int, c_int, *const c_char, *const f32, c_int, *const c_int, c_int) -> c_int;
+pub type SoundStopEventFn = extern "C" fn(c_int, *const c_int, c_int) -> c_int;
 
 /// The C-ABI engine-ops table. Field ORDER is the ABI.
 ///
@@ -482,6 +484,9 @@ pub struct S2EngineOps {
     pub entity_get_bone_transform: Option<EntityGetBoneTransformFn>,
     pub entity_lookup_attachment: Option<EntityLookupAttachmentFn>,
     pub entity_get_attachment: Option<EntityGetAttachmentFn>,
+    // --- sound event parameters: SoundOpGameSystem::SetSoundEventParam / StopSoundEvent ---
+    pub sound_set_param: Option<SoundSetParamFn>,
+    pub sound_stop_event: Option<SoundStopEventFn>,
 }
 
 impl S2EngineOps {
