@@ -758,3 +758,18 @@ changes the gap disables `weapon.data` with a named reason (`Weapon.dataUnavaila
 of reading a guessed address. The VData field offsets are schema lookups too. The accessors are
 read-only because one VData is shared by every weapon of that class. Unit-tested against the
 Oct 22 layout (`m_nSubclassID` 1532, `m_flAnimTime` 1544); live gate pending.
+## 2026-10-25 — Chat visibility in @s2script/cs2
+
+TTT keeps the dead's chat away from the living, and jailbreak and basechat-style plugins change who
+reads team chat. `Chat.onMessage` could only drop a whole message and re-send it. ModSharp calls
+`CCSGameRules::PlayerCanHearChat` for the same per-recipient decision. `chat.onCanHear` hooks it
+through a new trusted engine function (`playerCanHearChat`, `u8(ptr,ptr,ptr,u8)`) and the
+`cs2.chat-visibility.v1` package adapter. Continue does not vote, Handled and Stop vote the written
+`canHear` (false when none), Changed votes only when it wrote, and any false wins. When anyone votes,
+the engine's rule is skipped.
+
+The ModSharp pattern was self-verified on the Oct 22 build. It is unique at 0x140cbe0, and its body
+matches the ABI. Its only caller is Host_Say's recipient loop, right before the
+CanHearAndReadChatFrom virtual. The recipe is in the gamedata comment. The recording adapter host
+now models `bool` returns. Adapter conformance tests and the real-package activation test cover the
+new binding. The live gate is pending.
