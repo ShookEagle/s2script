@@ -880,3 +880,12 @@ identity snapshot (`ent_snapshot`, the books repair sweep's chunk walk) and comp
 mint refs. `Entity.findInSphere` filters `EntityRef.origin` inclusively, over `findByClass` when a
 class is given and over a new unfiltered `__s2_entity_find_all` otherwise. No engine op, shim or
 gamedata change. In-isolate test: `entity_finders_by_name_and_sphere`.
+## 2026-10-25 — Exact eye position in @s2script/cs2
+
+`pawn.aimTrace` guessed the eye height as 64 units above the origin. That is wrong while crouched
+(about 46 units), and TTT's gap doc flags it. `pawn.eyePosition` is the origin plus
+`CBaseModelEntity::m_vecViewOffset`, which is how Deadworks and Swiftly compute it. That field is a
+`CNetworkViewOffsetVector` of three `CNetworkedQuantizedFloat`s whose value is their first float.
+The quantized type is opaque to the schema, so the accessor checks its 8-byte stride from the
+reflected member offsets and reads null on any other layout. `aimTrace` uses it and keeps the old
+64u guess only as a fallback. Live gate pending.
