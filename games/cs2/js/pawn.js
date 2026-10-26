@@ -77,6 +77,7 @@
     molotov: [engineCall("emitMolotov"), 46],
     decoy: [engineCall("emitDecoy"), 47],
   };
+  var callSetItemAttribute = engineCall("setItemAttribute");
 
   // Internal namespace, same idiom as __s2pkg_cs2_schema / __s2pkg_cs2_nav: NOT part of the
   // @s2script/cs2 public surface. `status` is here so an operator can ask a live server WHY a game
@@ -87,6 +88,7 @@
     // weapon.js is concatenated BEFORE this file, so it cannot capture a callable at evaluation
     // time. It reads this one at CALL time instead, which is why the descriptor is published here.
     removePlayerItem: callRemovePlayerItem,
+    setItemAttribute: callSetItemAttribute,
   };
 
   function warn(msg) { if (globalThis.console) console.log("[s2script] " + msg); }
