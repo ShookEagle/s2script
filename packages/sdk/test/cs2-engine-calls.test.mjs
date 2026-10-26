@@ -42,6 +42,9 @@ const ALL_CALLS = ["commitSuicide", "changeTeam", "switchTeam", "terminateRound"
  * may itself call back into the package — which is how the re-entrancy tests are written, because
  * re-entrancy is exactly what these calls do on a real server.
  */
+/** Descriptors whose receiver is not an entity, so the package calls them without a `self`. */
+const RECEIVERLESS = new Set(["getMapGroupMapList"]);
+
 function makeHost({ ready = ALL_CALLS, onInvoke } = {}) {
   const readySet = new Set(ready);
   const invokes = [];            // { name, index, id, args }
@@ -109,7 +112,8 @@ function makeHost({ ready = ALL_CALLS, onInvoke } = {}) {
     // The four game-package call natives (core/src/v8host.rs). Absent natives are a DIFFERENT case
     // — an older host — and are covered by the "no natives at all" test below.
     __s2_game_call_ready: (name) => readySet.has(name),
-    __s2_game_call_receiverless: (name) => name.startsWith("emit"),
+    // Descriptors with no entity receiver (`"none"` or `"interface"`) take no leading self.
+    __s2_game_call_receiverless: (name) => RECEIVERLESS.has(name) || name.startsWith("emit"),
     __s2_game_call_status: (name) => readySet.has(name) ? "available" : "degraded in this test",
     __s2_game_call_invoke: (name, index, id, args) => {
       invokes.push({ name, index, id, args });
@@ -663,4 +667,25 @@ test("weapon.setAttribute: bad input, a stale weapon or a degraded descriptor ne
 test("weapon.setAttribute: a failed invocation (unresolved via hop) reports false", () => {
   const h = makeHost({ onInvoke: () => null });
   assert.equal(new h.pkg.Weapon(new h.EntityRef(50, 4)).setAttribute("kill eater", 1), false);
+});
+
+test("MapGroups.maps passes the group name straight through and returns the list or null", () => {
+  const h = makeHost({
+    ready: [...ALL_CALLS, "getMapGroupMapList"],
+    onInvoke: (name, args) => (name === "getMapGroupMapList" && args[0] === "mg_active"
+      ? ["de_dust2", "de_mirage"] : null),
+  });
+  assert.deepEqual([...h.pkg.MapGroups.maps("mg_active")], ["de_dust2", "de_mirage"]);
+  assert.deepEqual(h.invokes.at(-1), { name: "getMapGroupMapList", index: 0, id: 0, args: ["mg_active"] });
+  assert.strictEqual(h.pkg.MapGroups.maps("nope"), null);
+  const before = h.invokes.length;
+  assert.strictEqual(h.pkg.MapGroups.maps(""), null);
+  assert.strictEqual(h.pkg.MapGroups.maps(5), null);
+  assert.strictEqual(h.invokes.length, before, "a missing or non-string name never reaches the engine");
+});
+
+test("MapGroups.maps is null when the descriptor is degraded", () => {
+  const h = makeHost();
+  assert.strictEqual(h.pkg.MapGroups.maps("mg_active"), null);
+  assert.strictEqual(h.invokes.length, 0);
 });
