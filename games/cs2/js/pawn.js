@@ -872,6 +872,56 @@
     }
   };
 
+  // --- Particles: an info_particle_system (CParticleSystem) placed in the world. The recipient filter
+  //     the engine's DispatchParticleEffect takes is the entity's transmit set here: visibleTo hands
+  //     the slots to @s2script/transmit, which hides the entity from everyone else every snapshot.
+  //     The effect must be precached (built-in effects are; a custom .vpcf goes in onPrecache).
+  //     Game-world-owned; a `lifetime` removal is a timer of the calling plugin.
+  function particleSlots(list) {
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var v = list[i];
+      var slot = (typeof v === "number") ? v : (v && typeof v.slot === "number" ? v.slot : -1);
+      if (slot >= 0 && slot < 64 && out.indexOf(slot) < 0) out.push(slot);
+    }
+    return out;
+  }
+  function particleVec(v, name) {
+    if (v && typeof v.x === "number") return [v.x, v.y, v.z];
+    if (Array.isArray(v) && v.length === 3) return [+v[0], +v[1], +v[2]];
+    throw new TypeError("Particles.create: " + name + " must be a Vector, {x,y,z} or [x,y,z]");
+  }
+  var Particles = {
+    create: function (effect, origin, opts) {
+      opts = opts || {};
+      if (typeof effect !== "string" || !effect) throw new TypeError("Particles.create: effect must be a non-empty string");
+      var o = particleVec(origin, "origin");
+      var a = opts.angles !== undefined ? particleVec(opts.angles, "angles") : null;
+      var kv = { effect_name: effect, start_active: opts.start === false ? 0 : 1 };
+      var extra = opts.keyvalues || {};
+      for (var k in extra) if (Object.prototype.hasOwnProperty.call(extra, k)) kv[k] = extra[k];
+      var ent = globalThis.__s2pkg_entity;
+      // Create, place, then spawn: a keyvalue spawn would start the effect at the world origin
+      // before a later teleport could move it. EKV has no vector setter, so teleport places it.
+      var ref = ent.createEntity("info_particle_system");
+      if (!ref) return null;
+      ref.teleport(o, a);
+      if (!ref.spawn(kv)) { ref.remove(); return null; }
+      if (opts.visibleTo !== undefined) globalThis.__s2pkg_transmit.Transmit.setVisibleTo(ref, particleSlots(opts.visibleTo));
+      if (opts.parent) ref.acceptInput("SetParent", "!activator", opts.parent);
+      if (typeof opts.lifetime === "number" && opts.lifetime > 0) {
+        globalThis.__s2pkg_timers.delay(opts.lifetime * 1000).then(function () { ref.remove(); });
+      }
+      return {
+        ref: ref,
+        start: function () { return ref.acceptInput("Start"); },
+        stop: function () { return ref.acceptInput("Stop"); },
+        setVisibleTo: function (list) { return globalThis.__s2pkg_transmit.Transmit.setVisibleTo(ref, particleSlots(list)); },
+        remove: function () { return ref.remove(); }
+      };
+    }
+  };
+
   // TriggerZone — a runtime trigger_multiple with a programmatic AABB (zones real-trigger backend).
   // create -> configure collision schema -> spawn -> teleport -> Enable/activateCollision -> setModel ->
   // Enable/activateCollision (the arbitrary-box recipe: the post-spawn setModel builds the physics
@@ -1304,7 +1354,7 @@
     return sceneNodeGetter.call({ ref: ref });
   }
 
-  globalThis.__s2pkg_cs2 = Object.assign({}, globalThis.__s2pkg_cs2, { Pawn: Pawn, sceneNodeOf: sceneNodeOf, Player: Player, Events: (__s2require("@s2script/sdk/events") || {}).Events, ChatColors: ChatColors, Activity: Activity, pickPlayer: pickPlayer, Beam: Beam, GameRules: GameRules, Teams: Teams, RoundEndReason: RoundEndReason, WinPanelFinalEvent: WinPanelFinalEvent, Fade: Fade, Shake: Shake, HintText: HintText, CenterText: CenterText, AlertText: AlertText, CenterHtml: CenterHtml, TriggerZone: TriggerZone, Sounds: Sounds, Grenades: Grenades });
+  globalThis.__s2pkg_cs2 = Object.assign({}, globalThis.__s2pkg_cs2, { Pawn: Pawn, sceneNodeOf: sceneNodeOf, Player: Player, Events: (__s2require("@s2script/sdk/events") || {}).Events, ChatColors: ChatColors, Activity: Activity, pickPlayer: pickPlayer, Beam: Beam, GameRules: GameRules, Teams: Teams, RoundEndReason: RoundEndReason, WinPanelFinalEvent: WinPanelFinalEvent, Fade: Fade, Shake: Shake, HintText: HintText, CenterText: CenterText, AlertText: AlertText, CenterHtml: CenterHtml, TriggerZone: TriggerZone, Sounds: Sounds, Grenades: Grenades, Particles: Particles });
 
   // The ctx namespaces this game package contributes (core's generic extension point in
   // prelude.js merges these into every plugin's ctx). Each factory gets the prelude's ledger
