@@ -915,3 +915,25 @@ unconfirmed on this entry, so a pulse-driven input reports "". The FFI entry ret
 string work when nothing subscribes, because this hook runs for every I/O event in the map. This is
 core: entity I/O exists in every Source 2 game, and only the signature is per-game gamedata. Live
 gate pending.
+## 2026-10-25 — Deal damage and heal
+
+Plugins could hook damage (SDKHook OnTakeDamage) but not deal it. Writing `m_iHealth` skips armor,
+god mode, friendly fire, kill credit and the death event. SourceMod has `SDKHooks_TakeDamage`, and
+Swiftly and Deadworks both build a damage info and call TakeDamage. Damage info and TakeDamage exist
+in every Source 2 game, so this is core: `EntityRef.takeDamage(damage, opts)` and the SourceMod-shaped
+`SDKHooks_TakeDamage`, over a new `entity_take_damage` engine op.
+
+The shim copies the recipe from one of the engine's own callers on the Oct 22 build (@0x1bf75f0). It
+constructs a CTakeDamageInfo in a stack buffer sized from the live schema (`m_nSizeOf`; 0x118 today,
+refused if over 0x400), passes it to CBaseEntity::TakeDamage with a null result, and then runs the
+destructor. TakeDamage is the canonical entry: it refuses an entity whose m_takedamage is off, then
+tail-calls TakeDamageOld, so OnTakeDamage hooks see plugin damage. The three new core signatures
+(`CTakeDamageInfo_Ctor`, `CTakeDamageInfo_Dtor`, `CBaseEntity_TakeDamage`) are unique on the Oct 22
+build. The constructor pattern pins its three stack arguments. The shim also requires the
+constructor's and destructor's vtable LEAs to name the same vtable, so a wrong match degrades the op
+instead of running. A stale optional entity (attacker, inflictor, ability) refuses the whole call
+rather than dealing anonymous damage.
+
+Healing has no engine rules to run, so `pawn.heal(amount, { max })` lives in `@s2script/cs2` as a
+capped `m_iHealth` write. A core test covers the marshalling and refusals, and a bundle test covers
+heal. The live gate is pending.
