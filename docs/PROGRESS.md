@@ -900,3 +900,18 @@ the viewer list as an `@s2script/sdk/transmit` rule, which the CheckTransmit hoo
 snapshot. `Particles.create` does that, adds parenting and a timed removal, and needs no new
 gamedata. A filtered dispatch can come later if transient effects without an entity matter.
 Tested over the real bundle in packages/sdk/test/cs2-particles.test.mjs. Live gate pending.
+## 2026-10-25 — Entity input pre-hook (`onInput`)
+
+Swiftly and ModSharp both hook `CEntityIdentity::AcceptInput`; s2script could fire inputs and hook
+outputs but could not see or block an input. Every input an entity receives goes through
+`AcceptInput` (map I/O, the event queue, `EntityRef.acceptInput`), so it is a new named hook site
+in the shim beside the output hook, dispatching synchronously to core like `onOutput`. The
+signature is ModSharp's, unique on the Oct 22 build at 0x2293bb0; the disassembly confirms the
+identity in `rdi`, the input symbol's string in `[rsi]` and a bool result, and a string-xref to
+"activator" at +0x153 pins the body. A dropped input makes `AcceptInput` return false, as an
+unhandled input would. Input names are lowercased on both sides because Source treats them
+case-insensitively. Only the variant value is formatted; the pulse-argument register's type is
+unconfirmed on this entry, so a pulse-driven input reports "". The FFI entry returns before any
+string work when nothing subscribes, because this hook runs for every I/O event in the map. This is
+core: entity I/O exists in every Source 2 game, and only the signature is per-game gamedata. Live
+gate pending.
