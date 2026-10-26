@@ -937,3 +937,34 @@ rather than dealing anonymous damage.
 Healing has no engine rules to run, so `pawn.heal(amount, { max })` lives in `@s2script/cs2` as a
 capped `m_iHealth` write. A core test covers the marshalling and refusals, and a bundle test covers
 heal. The live gate is pending.
+## 2026-10-25 — Client convar query and replicate
+
+SourceMod has `QueryClientConVar` and `SendConVarValue`; ModSharp and Swiftly both have the pair.
+Plugins use them for anti-cheat checks (`cl_interp_ratio`, `m_yaw`) and client-only settings. Both
+are Source 2 engine messages, so this is core: `Client.queryConVar(name)` and
+`Client.replicateConVar(name, value)` over two new engine ops, `client_query_convar` and
+`client_replicate_convar`.
+
+A query sends CSVCMsg_GetCvarValue with a cookie; the client answers with CCLCMsg_RespondCvarValue,
+which the engine hands to `CServerSideClient::ProcessRespondCvarValue`, a stock `return true`. The shim
+hooks that virtual as a checked KHook global virtual on the RTTI-resolved `CServerSideClient` vtable in
+libengine2.so, as it does for OnPrecacheResource. On the Oct 22 build the handler table registers slot
+40 for clc_RespondCvarValue (id 25); ModSharp hooks the same slot. The hook copies the four fields by
+protobuf reflection, queues them (at most 32 per client per frame, so a flooding client drops only
+its own replies) and drains the queue at the top of the next GameFramePre, so JS never runs on
+whatever thread the engine processes client messages on. A pending query keeps the frame detour
+requested so that drain runs. A query settles exactly once: a reply delivered while the isolate is
+busy is kept and retried by the next frame's sweep, and a query with no reply after 15 seconds (or
+whose connection is gone) resolves null.
+
+The hook also reads the answering client's slot (int32 at 0x48, gamedata
+`CServerSideClient_m_nClientSlot`). Three vtable slots on the same build use `[rdi+0x48]` as the
+player slot, and ModSharp's `m_Slot` agrees. Core delivers a reply only to the query that minted its
+cookie, and only when the slot that answered is the slot queried, that slot is still the same
+connection, and the echoed name matches. Cookies are unpredictable, so one client cannot answer
+another's query. Each pending query is a subscription keyed by its cookie, so plugin unload drops it;
+a disconnect resolves it `null`. Replicate builds CNETMsg_SetConVar `{convars {cvars [{name, value}]}}`
+by reflection and posts it to the one slot.
+
+Core tests cover routing, refusal, cancellation and unload; the named-hook invocation test covers the
+new hook. The live gate is pending.
