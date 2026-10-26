@@ -263,6 +263,7 @@ pub type ServerTickIntervalFn = extern "C" fn() -> f32;
 pub type EntityTakeDamageFn = extern "C" fn(c_int, c_int, c_int, c_int, c_int, c_int, c_int, c_int, f32, c_int, *const f32, *const f32) -> c_int;
 pub type ClientQueryConvarFn = extern "C" fn(slot: c_int, name: *const c_char, cookie: c_int) -> c_int;
 pub type ClientReplicateConvarFn = extern "C" fn(slot: c_int, name: *const c_char, value: *const c_char) -> c_int;
+pub type ClientNetStatsFn = extern "C" fn(slot: c_int, out: *mut f64, n: c_int) -> c_int;
 
 /// The C-ABI engine-ops table. Field ORDER is the ABI.
 ///
@@ -465,6 +466,8 @@ pub struct S2EngineOps {
     // --- client convar query + replicate ---
     pub client_query_convar: Option<ClientQueryConvarFn>,
     pub client_replicate_convar: Option<ClientReplicateConvarFn>,
+    // --- client net stats (INetChannelInfo) ---
+    pub client_net_stats: Option<ClientNetStatsFn>,
 }
 
 impl S2EngineOps {

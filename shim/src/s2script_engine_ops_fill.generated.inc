@@ -194,3 +194,5 @@
     // --- client convar query + replicate ---
     ops.client_query_convar = &s2_client_query_convar;
     ops.client_replicate_convar = &s2_client_replicate_convar;
+    // --- client net stats (INetChannelInfo) ---
+    ops.client_net_stats = &s2_client_net_stats;
