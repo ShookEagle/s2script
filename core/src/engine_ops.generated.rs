@@ -264,6 +264,8 @@ pub type EntityTakeDamageFn = extern "C" fn(c_int, c_int, c_int, c_int, c_int, c
 pub type ClientQueryConvarFn = extern "C" fn(slot: c_int, name: *const c_char, cookie: c_int) -> c_int;
 pub type ClientReplicateConvarFn = extern "C" fn(slot: c_int, name: *const c_char, value: *const c_char) -> c_int;
 pub type ClientNetStatsFn = extern "C" fn(slot: c_int, out: *mut f64, n: c_int) -> c_int;
+pub type EngineCallBindInterfaceFn = extern "C" fn(call_id: c_int, name: *const c_char, slot: c_int, reason_out: *mut c_char, reason_cap: c_int) -> c_int;
+pub type EngineCallTakeStringsFn = extern "C" fn(out: *mut c_char, cap: c_int) -> c_int;
 
 /// The C-ABI engine-ops table. Field ORDER is the ABI.
 ///
@@ -468,6 +470,9 @@ pub struct S2EngineOps {
     pub client_replicate_convar: Option<ClientReplicateConvarFn>,
     // --- client net stats (INetChannelInfo) ---
     pub client_net_stats: Option<ClientNetStatsFn>,
+    // --- Plugin-declared engine calls ---
+    pub engine_call_bind_interface: Option<EngineCallBindInterfaceFn>,
+    pub engine_call_take_strings: Option<EngineCallTakeStringsFn>,
 }
 
 impl S2EngineOps {

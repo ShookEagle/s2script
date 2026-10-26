@@ -240,6 +240,8 @@ typedef int (*s2_entity_take_damage_fn)(int index, int serial, int inflictorIdx,
 typedef int (*s2_client_query_convar_fn)(int slot, const char* name, int cookie);
 typedef int (*s2_client_replicate_convar_fn)(int slot, const char* name, const char* value);
 typedef int (*s2_client_net_stats_fn)(int slot, double* out, int n);
+typedef int (*s2_engine_call_bind_interface_fn)(int callId, const char* name, int slot, char* reasonOut, int reasonCap);
+typedef int (*s2_engine_call_take_strings_fn)(char* out, int cap);
 
 /* The C-ABI engine-ops table. Field ORDER is the ABI. Generated from
  * core/engine-ops.jsonc — must stay index-for-index with the Rust mirror. */
@@ -439,4 +441,7 @@ typedef struct {
     s2_client_replicate_convar_fn client_replicate_convar;
     /* --- client net stats (INetChannelInfo) --- */
     s2_client_net_stats_fn client_net_stats;
+    /* --- Plugin-declared engine calls --- */
+    s2_engine_call_bind_interface_fn engine_call_bind_interface;
+    s2_engine_call_take_strings_fn engine_call_take_strings;
 } S2EngineOps;
