@@ -266,6 +266,10 @@ pub type ClientReplicateConvarFn = extern "C" fn(slot: c_int, name: *const c_cha
 pub type ClientNetStatsFn = extern "C" fn(slot: c_int, out: *mut f64, n: c_int) -> c_int;
 pub type EngineCallBindInterfaceFn = extern "C" fn(call_id: c_int, name: *const c_char, slot: c_int, reason_out: *mut c_char, reason_cap: c_int) -> c_int;
 pub type EngineCallTakeStringsFn = extern "C" fn(out: *mut c_char, cap: c_int) -> c_int;
+pub type EntityLookupBoneFn = extern "C" fn(index: c_int, serial: c_int, name: *const c_char) -> c_int;
+pub type EntityGetBoneTransformFn = extern "C" fn(index: c_int, serial: c_int, bone: c_int, out: *mut f32) -> c_int;
+pub type EntityLookupAttachmentFn = extern "C" fn(index: c_int, serial: c_int, name: *const c_char) -> c_int;
+pub type EntityGetAttachmentFn = extern "C" fn(index: c_int, serial: c_int, attachment: c_int, out: *mut f32) -> c_int;
 
 /// The C-ABI engine-ops table. Field ORDER is the ABI.
 ///
@@ -473,6 +477,11 @@ pub struct S2EngineOps {
     // --- Plugin-declared engine calls ---
     pub engine_call_bind_interface: Option<EngineCallBindInterfaceFn>,
     pub engine_call_take_strings: Option<EngineCallTakeStringsFn>,
+    // --- bones and attachments ---
+    pub entity_lookup_bone: Option<EntityLookupBoneFn>,
+    pub entity_get_bone_transform: Option<EntityGetBoneTransformFn>,
+    pub entity_lookup_attachment: Option<EntityLookupAttachmentFn>,
+    pub entity_get_attachment: Option<EntityGetAttachmentFn>,
 }
 
 impl S2EngineOps {

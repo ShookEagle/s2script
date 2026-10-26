@@ -242,6 +242,10 @@ typedef int (*s2_client_replicate_convar_fn)(int slot, const char* name, const c
 typedef int (*s2_client_net_stats_fn)(int slot, double* out, int n);
 typedef int (*s2_engine_call_bind_interface_fn)(int callId, const char* name, int slot, char* reasonOut, int reasonCap);
 typedef int (*s2_engine_call_take_strings_fn)(char* out, int cap);
+typedef int (*s2_entity_lookup_bone_fn)(int index, int serial, const char* name);
+typedef int (*s2_entity_get_bone_transform_fn)(int index, int serial, int bone, float* out);
+typedef int (*s2_entity_lookup_attachment_fn)(int index, int serial, const char* name);
+typedef int (*s2_entity_get_attachment_fn)(int index, int serial, int attachment, float* out);
 
 /* The C-ABI engine-ops table. Field ORDER is the ABI. Generated from
  * core/engine-ops.jsonc — must stay index-for-index with the Rust mirror. */
@@ -444,4 +448,9 @@ typedef struct {
     /* --- Plugin-declared engine calls --- */
     s2_engine_call_bind_interface_fn engine_call_bind_interface;
     s2_engine_call_take_strings_fn engine_call_take_strings;
+    /* --- bones and attachments --- */
+    s2_entity_lookup_bone_fn entity_lookup_bone;
+    s2_entity_get_bone_transform_fn entity_get_bone_transform;
+    s2_entity_lookup_attachment_fn entity_lookup_attachment;
+    s2_entity_get_attachment_fn entity_get_attachment;
 } S2EngineOps;

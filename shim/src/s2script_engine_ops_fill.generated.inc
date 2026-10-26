@@ -199,3 +199,8 @@
     // --- Plugin-declared engine calls ---
     ops.engine_call_bind_interface = &S2_EngineCallBindInterface;
     ops.engine_call_take_strings = &S2_EngineCallTakeStrings;
+    // --- bones and attachments ---
+    ops.entity_lookup_bone = &Shim_EntityLookupBone;
+    ops.entity_get_bone_transform = &Shim_EntityGetBoneTransform;
+    ops.entity_lookup_attachment = &Shim_EntityLookupAttachment;
+    ops.entity_get_attachment = &Shim_EntityGetAttachment;
