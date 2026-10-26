@@ -747,3 +747,14 @@ uses), and `CenterHtml`, which keeps `show_survival_respawn_status` on screen by
 frame until its duration runs out. That is the loop `plugins/disabled/rockthevote` writes by hand.
 The frame handler is subscribed only while a message is showing, from the calling plugin's context,
 so its ledger tears it down at unload. Live gate pending (which dest renders where is a client fact).
+## 2026-10-25 — Weapon VData in @s2script/cs2
+
+Plugins that check a weapon's max clip, price or damage had no way to read it: those values live in
+the weapon's VData (`CCSWeaponBaseVData`), which the entity reaches through `m_pSubclassVData`, a
+pointer the schema does not reflect. ModSharp locates it as the 8 bytes after `m_nSubclassID` and
+checks that `m_flAnimTime` follows 12 bytes later; `weapon.data` does the same from live schema
+offsets, so a CS2 update that moves `CBaseEntity` fields moves the pointer with them, and one that
+changes the gap disables `weapon.data` with a named reason (`Weapon.dataUnavailableReason`) instead
+of reading a guessed address. The VData field offsets are schema lookups too. The accessors are
+read-only because one VData is shared by every weapon of that class. Unit-tested against the
+Oct 22 layout (`m_nSubclassID` 1532, `m_flAnimTime` 1544); live gate pending.
