@@ -738,3 +738,12 @@ Swiftly's call shape `(this, weapon, 0, momentum)` were the hints. The new `pawn
 drops one held weapon; both refuse a weapon the pawn does not hold. The engine picks the throw
 velocity (a null velocity pointer). The unused index 24 is gone from `games/cs2/gamedata`. TTT's
 framework-gap doc listed this as a missing binding. Live gate pending.
+## 2026-10-25 — Center, alert and HTML center text in @s2script/cs2
+
+SourceMod plugins print to the center of the screen constantly (`PrintCenterText`), and Swiftly and
+ModSharp both ship center, alert and HTML center helpers. s2script only had `HintText.to`. The cs2
+package now has `CenterText` and `AlertText` (`TextMsg` with dest 4 and 6, the numbers Swiftly
+uses), and `CenterHtml`, which keeps `show_survival_respawn_status` on screen by re-sending it every
+frame until its duration runs out. That is the loop `plugins/disabled/rockthevote` writes by hand.
+The frame handler is subscribed only while a message is showing, from the calling plugin's context,
+so its ledger tears it down at unload. Live gate pending (which dest renders where is a client fact).
