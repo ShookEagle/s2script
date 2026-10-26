@@ -728,3 +728,13 @@ landed. Source 2's `CEntityInstance::Spawn` takes `const CEntityKeyValues*`, and
 `const EntityUseInput_t*` (activator, caller, type, value) instead of four arguments. Both hooks
 now take and forward the real argument. The JavaScript callback shapes are unchanged. `Think` has no
 Source 2 virtual and stays unsupported. Live gate pending.
+## 2026-10-25 — Drop weapons as world pickups
+
+`pawn.dropActiveWeapon()` was a stub that always returned `false`, because the borrowed
+`DropActivePlayerWeapon` vtable index 24 turned out to be a GiveNamedItem thunk. Dropping now goes
+through `CCSPlayer_WeaponServices::DropWeapon`, the virtual at slot 29 of that class's vtable on the
+Oct 22 2026 build, found by signature and gated by `vtable-member`. ModSharp's slot number and
+Swiftly's call shape `(this, weapon, 0, momentum)` were the hints. The new `pawn.dropWeapon(weapon)`
+drops one held weapon; both refuse a weapon the pawn does not hold. The engine picks the throw
+velocity (a null velocity pointer). The unused index 24 is gone from `games/cs2/gamedata`. TTT's
+framework-gap doc listed this as a missing binding. Live gate pending.
