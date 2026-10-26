@@ -1118,3 +1118,22 @@ offsets. At load the shim reads the vtable header through the fault-free reader 
 offset-to-top and type_info to agree with the gamedata offset, then runs the slots through the same
 pin and range check as the interface hooks. Any mismatch is a named gamedata FAIL and both
 functions answer "unknown" (null / false). Live gate pending.
+## 2026-10-26 — Network string tables
+
+The last Swiftly/ModSharp parity gap. SourceMod plugins use string tables for precache lookups and
+effect indices (ModSharp's particle manager looks `ParticleEffect` up in `EffectDispatch`), and every
+Source 2 game has them, so this is core: `@s2script/sdk/stringtables`, with `StringTables.find /
+get / count / all` and a `StringTable` handle (`count`, `findString`, `getString`, `getData`,
+`setData`, `addString`).
+
+The engine rebuilds its tables on a map change, so the handle is `{ id, name }` and holds no
+pointer. Each of the nine ops takes the id and the name, and the shim re-finds the table with
+`GetTable(id)` and requires `GetTableName` to still match; a stale handle answers -1 / null / false.
+The container is `Source2EngineToServerStringTable001`. Every index is a gamedata/core offset taken
+from s2sdk's `networkstringtabledefs.h` and read on the Oct 22 libengine2.so: the container
+(CNetworkStringTableContainer, 22 slots; FindTable 15, GetTable 16, GetNumTables 17) is checked at
+Load, and the table class (CNetworkStringTable, 18 slots; name 2, count 4, AddString 8, GetString 9,
+SetStringUserData 10, GetStringUserData 11, FindStringIndex 12) on the first table seen, both with
+the interface-hook pin and range check. A table whose vtable is not the verified one is refused.
+User data crosses as a copied `Uint8Array` (a string is written as UTF-8), and reads grow their
+buffer once up to 1 MiB. Cookbook: `sm_st_list` / `sm_st_find` / `sm_st_show`. Live gate pending.
