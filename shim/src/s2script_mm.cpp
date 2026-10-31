@@ -5,6 +5,7 @@
 #include "khook_shutdown.h"
 #include "gamedata.h"
 #include "../third_party/json.hpp"
+#include <climits>
 
 // The engine interfaces we hook and call: ISource2Server / ISource2GameClients /
 // ISource2GameEntities (+ CCheckTransmitInfo), IVEngineServer2, ISource2ServerConfig.
@@ -1721,7 +1722,8 @@ static inline bool s2_usermsg_bit(int id) {
 // hop is guarded (CPPTYPE_MESSAGE, !is_repeated) — a scalar Get* on a repeated field is a protobuf
 // FATAL that aborts the process (the shipping s2_user_message_set_* guards, mirrored). nullptr on a miss.
 static const google::protobuf::Message* s2_usermsg_walk(const google::protobuf::Message* m,
-                                                        const char* path, std::string& leaf) {
+                                                        const char* path, std::string& leaf,
+                                                        bool requirePresent = false) {
     if (!m || !path) return nullptr;
     std::string p(path);
     const google::protobuf::Message* cur = m;
@@ -1735,6 +1737,7 @@ static const google::protobuf::Message* s2_usermsg_walk(const google::protobuf::
         const google::protobuf::FieldDescriptor* f = d->FindFieldByName(seg);
         if (!f || f->is_repeated()) return nullptr;                                 // repeated hop -> FATAL guard
         if (f->cpp_type() != google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) return nullptr;
+        if (requirePresent && !r->HasField(*cur, f)) return nullptr;
         cur = &r->GetMessage(*cur, f);
         if (!cur) return nullptr;
     }
@@ -1875,6 +1878,50 @@ static int s2_usermsg_hook_read_string(const char* path, char* buf, int buflen) 
     buf[n] = 0;
     return n;
 }
+// Returns the full JSON byte length; a null buffer queries the size. Never truncate a parameter.
+static int s2_usermsg_hook_read_strings(const char* path, char* buf, int buflen) {
+    std::string leaf;
+    const auto* m = s2_usermsg_walk(s_hookMsg, path, leaf);
+    if (!m) return -1;
+    const auto* d = m->GetDescriptor();
+    const auto* r = m->GetReflection();
+    if (!d || !r) return -1;
+    const auto* f = d->FindFieldByName(leaf);
+    if (!f || !f->is_repeated() || f->cpp_type() != google::protobuf::FieldDescriptor::CPPTYPE_STRING) return -1;
+    auto values = nlohmann::json::array();
+    for (int i = 0; i < r->FieldSize(*m, f); ++i) values.push_back(r->GetRepeatedString(*m, f, i));
+    try {
+        const std::string encoded = values.dump();
+        if (encoded.size() >= static_cast<size_t>(INT_MAX)) return -1;
+        const int size = static_cast<int>(encoded.size());
+        if (buf) {
+            if (buflen <= size) return -1;
+            memcpy(buf, encoded.c_str(), size + 1);
+        }
+        return size;
+    } catch (const nlohmann::json::exception&) { return -1; }
+}
+
+static int s2_usermsg_hook_set_int(const char* path, long long value) {
+    std::string leaf;
+    // A missing parent resolves to protobuf's immutable default instance: never mutate it.
+    auto* m = const_cast<google::protobuf::Message*>(s2_usermsg_walk(s_hookMsg, path, leaf, true));
+    if (!m) return 0;
+    const auto* d = m->GetDescriptor();
+    const auto* r = m->GetReflection();
+    if (!d || !r) return 0;
+    const auto* f = d->FindFieldByName(leaf);
+    if (!f || f->is_repeated()) return 0;
+    using FD = google::protobuf::FieldDescriptor;
+    if (f->cpp_type() == FD::CPPTYPE_INT32 && value >= INT32_MIN && value <= INT32_MAX) {
+        r->SetInt32(m, f, static_cast<int32_t>(value)); return 1;
+    }
+    if (f->cpp_type() == FD::CPPTYPE_UINT32 && value >= 0 && value <= UINT32_MAX) {
+        r->SetUInt32(m, f, static_cast<uint32_t>(value)); return 1;
+    }
+    return 0;
+}
+
 static int s2_usermsg_hook_has_field(const char* path) {
     if (!s_hookMsg) return -1;
     if (!path) return 0;

@@ -2028,6 +2028,24 @@
       "c_ret": "int",
       "c_params": "int tableId, const char* tableName, const char* value, const unsigned char* data, int len",
       "shim": "s2_stringtable_add_string"
+    },
+    {
+      "name": "usermsg_hook_read_strings",
+      "alias": "UsermsgHookReadStringsFn",
+      "rust": "extern \"C\" fn(*const c_char, *mut c_char, c_int) -> c_int",
+      "group": "UserMessage repeated strings and scalar edits",
+      "c_ret": "int",
+      "c_params": "const char* path, char* buf, int buflen",
+      "shim": "s2_usermsg_hook_read_strings"
+    },
+    {
+      "name": "usermsg_hook_set_int",
+      "alias": "UsermsgHookSetIntFn",
+      "rust": "extern \"C\" fn(*const c_char, i64) -> c_int",
+      "group": "UserMessage repeated strings and scalar edits",
+      "c_ret": "int",
+      "c_params": "const char* path, long long value",
+      "shim": "s2_usermsg_hook_set_int"
     }
   ]
 }

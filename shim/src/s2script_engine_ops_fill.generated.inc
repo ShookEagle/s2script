@@ -220,3 +220,6 @@
     ops.stringtable_get_data = &s2_stringtable_get_data;
     ops.stringtable_set_data = &s2_stringtable_set_data;
     ops.stringtable_add_string = &s2_stringtable_add_string;
+    // --- UserMessage repeated strings and scalar edits ---
+    ops.usermsg_hook_read_strings = &s2_usermsg_hook_read_strings;
+    ops.usermsg_hook_set_int = &s2_usermsg_hook_set_int;
