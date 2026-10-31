@@ -283,6 +283,8 @@ pub type StringTableGetStringFn = extern "C" fn(c_int, *const c_char, c_int, *mu
 pub type StringTableGetDataFn = extern "C" fn(c_int, *const c_char, c_int, *mut u8, c_int) -> c_int;
 pub type StringTableSetDataFn = extern "C" fn(c_int, *const c_char, c_int, *const u8, c_int) -> c_int;
 pub type StringTableAddStringFn = extern "C" fn(c_int, *const c_char, *const c_char, *const u8, c_int) -> c_int;
+pub type UsermsgHookReadStringsFn = extern "C" fn(*const c_char, *mut c_char, c_int) -> c_int;
+pub type UsermsgHookSetIntFn = extern "C" fn(*const c_char, i64) -> c_int;
 
 /// The C-ABI engine-ops table. Field ORDER is the ABI.
 ///
@@ -511,6 +513,9 @@ pub struct S2EngineOps {
     pub stringtable_get_data: Option<StringTableGetDataFn>,
     pub stringtable_set_data: Option<StringTableSetDataFn>,
     pub stringtable_add_string: Option<StringTableAddStringFn>,
+    // --- UserMessage repeated strings and scalar edits ---
+    pub usermsg_hook_read_strings: Option<UsermsgHookReadStringsFn>,
+    pub usermsg_hook_set_int: Option<UsermsgHookSetIntFn>,
 }
 
 impl S2EngineOps {

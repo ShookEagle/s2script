@@ -1114,21 +1114,27 @@ globalThis.Phase      = { Pre:"pre", Post:"post" };
   // stashed view) return null/[]/"" — never a dangling pointer. Suppression is the HookResult return
   // (>= Handled supersedes the send for EVERY recipient). Plugin-originated sends from inside any JS
   // dispatch do NOT re-trigger these hooks (recursion guard; documented v1 limitation).
-  function __s2_umView(name, id) {
+  function __s2_umView(name, id, active) {
     return {
       name: name, id: id,
-      get recipients() { return __s2_usermsg_recipients(); },
-      get debugString() { return __s2_usermsg_debug(); },
-      hasField:   function (p) { return __s2_usermsg_has_field(String(p)) === 1; },
-      readInt:    function (p) { return __s2_usermsg_read_int(String(p)); },
-      readFloat:  function (p) { return __s2_usermsg_read_float(String(p)); },
-      readBool:   function (p) { var v = __s2_usermsg_read_int(String(p)); return v === null ? null : v !== 0; },
-      readString: function (p) { return __s2_usermsg_read_string(String(p)); }
+      get recipients() { return active() ? __s2_usermsg_recipients() : []; },
+      get debugString() { return active() ? __s2_usermsg_debug() : ""; },
+      hasField:   function (p) { return active() && __s2_usermsg_has_field(String(p)) === 1; },
+      readInt:    function (p) { return active() ? __s2_usermsg_read_int(String(p)) : null; },
+      readFloat:  function (p) { return active() ? __s2_usermsg_read_float(String(p)) : null; },
+      readBool:   function (p) { var v = active() ? __s2_usermsg_read_int(String(p)) : null; return v === null ? null : v !== 0; },
+      readString: function (p) { return active() ? __s2_usermsg_read_string(String(p)) : null; },
+      readStrings:function (p) { return active() ? __s2_usermsg_read_strings(String(p)) : null; },
+      setInt:     function (p, v) { return active() && __s2_usermsg_set_int(String(p), v); }
     };
   }
   var UserMessages = {
     onPre: function (name, handler) {
-      var canonical = __s2_usermsg_on(String(name), function (n, id) { return handler(__s2_umView(n, id)); });
+      var canonical = __s2_usermsg_on(String(name), function (n, id) {
+        var active = true;
+        try { return handler(__s2_umView(n, id, function () { return active; })); }
+        finally { active = false; }
+      });
       if (!canonical)
         throw new Error("UserMessages.onPre: cannot resolve message '" + name +
                         "' (unknown name, or the intercept descriptor is degraded — see server log)");

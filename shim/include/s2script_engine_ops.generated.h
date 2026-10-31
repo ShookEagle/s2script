@@ -259,6 +259,8 @@ typedef int (*s2_stringtable_get_string_fn)(int tableId, const char* tableName, 
 typedef int (*s2_stringtable_get_data_fn)(int tableId, const char* tableName, int index, unsigned char* out, int cap);
 typedef int (*s2_stringtable_set_data_fn)(int tableId, const char* tableName, int index, const unsigned char* data, int len);
 typedef int (*s2_stringtable_add_string_fn)(int tableId, const char* tableName, const char* value, const unsigned char* data, int len);
+typedef int (*s2_usermsg_hook_read_strings_fn)(const char* path, char* buf, int buflen);
+typedef int (*s2_usermsg_hook_set_int_fn)(const char* path, long long value);
 
 /* The C-ABI engine-ops table. Field ORDER is the ABI. Generated from
  * core/engine-ops.jsonc — must stay index-for-index with the Rust mirror. */
@@ -482,4 +484,7 @@ typedef struct {
     s2_stringtable_get_data_fn stringtable_get_data;
     s2_stringtable_set_data_fn stringtable_set_data;
     s2_stringtable_add_string_fn stringtable_add_string;
+    /* --- UserMessage repeated strings and scalar edits --- */
+    s2_usermsg_hook_read_strings_fn usermsg_hook_read_strings;
+    s2_usermsg_hook_set_int_fn usermsg_hook_set_int;
 } S2EngineOps;

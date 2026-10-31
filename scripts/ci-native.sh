@@ -99,6 +99,9 @@ bash scripts/check-deferred-sentinel.sh
 echo "== check-engine-ops-order.sh (S2EngineOps field order: core == shim header) =="
 bash scripts/check-engine-ops-order.sh
 
+echo "== test-usermsg-fields.py (production protobuf reads and edits) =="
+python3 scripts/test-usermsg-fields.py
+
 echo "== test-defer-queue.sh (the deferred-dispatch drain, flush-inside-replay included) =="
 bash scripts/test-defer-queue.sh
 
